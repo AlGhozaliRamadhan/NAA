@@ -85,7 +85,13 @@ class InferenceEngine:
                 or (self.model_path.is_dir() and list(self.model_path.glob("*.gguf")))
             )
 
-            if is_gguf and LLAMA_CPP_AVAILABLE:
+            if is_gguf:
+                if not LLAMA_CPP_AVAILABLE:
+                    raise RuntimeError(
+                        "Model is in GGUF format, but 'llama-cpp-python' is not installed in the environment. "
+                        "To use GGUF models on Kaggle/Colab with GPU support, install llama-cpp-python via: "
+                        "pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121"
+                    )
                 model_file = self.model_path
                 if model_file.is_dir():
                     model_file = list(model_file.glob("*.gguf"))[0]

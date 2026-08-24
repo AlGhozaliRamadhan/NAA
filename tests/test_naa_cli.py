@@ -66,3 +66,31 @@ def test_state_persistence(tmp_path: Path, monkeypatch):
     state = cli.load_state()
     assert state.get("model_key") == "4bit"
     assert state.get("admin_key") == "naa-test-cli-key"
+
+def test_parse_cli_args():
+    # Flag syntax: --model <url>
+    url = "https://huggingface.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED/blob/main/Qwen3.8-27B-OBLITERATED-Q4_K_M.gguf"
+    res1 = cli._parse_cli_args(["--model", url])
+    assert res1["model"] == url
+    assert res1["preset"] is None
+
+    # Flag syntax: -m <url> and --preset uncensored
+    res2 = cli._parse_cli_args(["-m", url, "--preset", "uncensored"])
+    assert res2["model"] == url
+    assert res2["preset"] == "uncensored"
+
+    # Equals syntax
+    res3 = cli._parse_cli_args([f"--model={url}", "--preset=uncensored"])
+    assert res3["model"] == url
+    assert res3["preset"] == "uncensored"
+
+    # Positional model with positional preset
+    res4 = cli._parse_cli_args(["4bit", "uncensored"])
+    assert res4["model"] == "4bit"
+    assert res4["preset"] == "uncensored"
+
+    # Uncensored flag only
+    res5 = cli._parse_cli_args(["uncensored"])
+    assert res5["model"] is None
+    assert res5["preset"] == "uncensored"
+

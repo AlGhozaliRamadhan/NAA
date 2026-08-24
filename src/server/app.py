@@ -38,6 +38,9 @@ def create_app(
             quant_mode=settings.quant_mode,
             preset=settings.preset,
             system_prompt=settings.system_prompt,
+            n_ctx=settings.max_context,
+            n_gpu_layers=settings.n_gpu_layers,
+            flash_attn=settings.flash_attn,
             trust_remote_code=settings.trust_remote_code
         )
 

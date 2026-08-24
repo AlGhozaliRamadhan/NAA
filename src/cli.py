@@ -359,8 +359,50 @@ def api_call(method: str, path: str, admin_key: str, data: Dict[str, Any] = None
         err(str(e))
         return None
 
+def _parse_cli_args(args: Optional[list]) -> Dict[str, Any]:
+    res: Dict[str, Any] = {
+        "model": None,
+        "preset": None,
+        "system_prompt": None,
+    }
+    if not args:
+        return res
+
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg in ("--model", "-m") and i + 1 < len(args):
+            res["model"] = args[i + 1]
+            i += 2
+        elif arg.startswith("--model="):
+            res["model"] = arg.split("=", 1)[1]
+            i += 1
+        elif arg in ("--preset", "-p") and i + 1 < len(args):
+            res["preset"] = args[i + 1]
+            i += 2
+        elif arg.startswith("--preset="):
+            res["preset"] = arg.split("=", 1)[1]
+            i += 1
+        elif arg in ("--system-prompt", "-s") and i + 1 < len(args):
+            res["system_prompt"] = args[i + 1]
+            i += 2
+        elif arg.startswith("--system-prompt="):
+            res["system_prompt"] = arg.split("=", 1)[1]
+            i += 1
+        elif arg in ("uncensored", "default") and res["preset"] is None:
+            res["preset"] = arg
+            i += 1
+        elif not arg.startswith("-") and res["model"] is None:
+            res["model"] = arg
+            i += 1
+        else:
+            i += 1
+
+    return res
+
 def cmd_setup(args: list = None):
-    target_arg = args[0] if args else None
+    parsed = _parse_cli_args(args)
+    target_arg = parsed.get("model")
     print_banner(target_arg)
     header("Setup")
     install_deps()
@@ -383,6 +425,7 @@ def cmd_start(args: list = None):
 
     load_state_fn = _get_attr("load_state", load_state)
     save_state_fn = _get_attr("save_state", save_state)
+    choose_model_fn = _get_attr("choose_model", choose_model)
     download_model_fn = _get_attr("download_model", download_model)
     start_server_fn = _get_attr("start_server", start_server)
     start_tunnel_fn = _get_attr("start_tunnel", start_tunnel)
@@ -391,39 +434,45 @@ def cmd_start(args: list = None):
     public_health_ok_fn = _get_attr("_public_health_ok", public_health_ok)
 
     state = load_state_fn()
+    parsed = _parse_cli_args(args)
 
-    model_arg = args[0] if args else None
-    preset_arg = "uncensored" if (args and "uncensored" in args) else state.get("preset", settings.preset)
+    model_arg = parsed.get("model")
+    preset_arg = parsed.get("preset") or state.get("preset", settings.preset)
+    system_prompt_arg = parsed.get("system_prompt") or state.get("system_prompt", settings.system_prompt)
 
-    model_key = model_arg or state.get("model_key")
-    model_path_str = state.get("model_path")
+    model_key = model_arg or state.get("model_key") or "auto"
+    model_path_str = state.get("model_path") if not model_arg else None
 
-    if not model_key and not model_path_str:
-        warn("No model configured. Running setup first...")
-        cmd_setup()
-        state = load_state_fn()
-        model_key = state.get("model_key")
-        model_path_str = state.get("model_path")
+    model_cfg = choose_model_fn(auto=model_key)
 
-    if model_key and model_key in MODELS:
-        model_cfg = MODELS[model_key]
-    elif model_key and "/" in model_key:
-        model_cfg = {"name": model_key.split("/")[-1], "repo": model_key, "dir": model_key.split("/")[-1], "quant": "auto"}
+    if model_path_str and Path(model_path_str).exists() and is_model_complete(Path(model_path_str), model_cfg):
+        model_path = Path(model_path_str)
     else:
-        model_cfg = list(MODELS.values())[0]
+        filename = model_cfg.get("file", "model.safetensors.index.json")
+        if filename.endswith(".gguf"):
+            expected_path = MODEL_DIR / filename
+        else:
+            model_dir_name = model_cfg.get("dir", model_cfg.get("name", "model"))
+            expected_path = MODEL_DIR / model_dir_name
 
-    model_path = Path(model_path_str) if model_path_str else MODEL_DIR / model_cfg.get("dir", "model")
+        if is_model_complete(expected_path, model_cfg):
+            model_path = expected_path
+        else:
+            model_path = download_model_fn(model_cfg)
 
-    if not is_model_complete(model_path, model_cfg):
-        model_path = download_model_fn(model_cfg)
-
-    active_name = state.get("model_name", model_cfg.get("name", model_path.name))
+    active_name = model_cfg.get("name", model_path.name)
     print_banner(active_name)
 
     admin_key = state.get("admin_key") or f"naa-{secrets.token_urlsafe(32)}"
     if not admin_key.startswith("naa-"):
         admin_key = f"naa-{admin_key}"
-    save_state_fn({"admin_key": admin_key, "model_name": active_name})
+    save_state_fn({
+        "admin_key": admin_key,
+        "model_name": active_name,
+        "model_key": model_key,
+        "model_path": str(model_path),
+        "preset": preset_arg,
+    })
 
     header("Starting NAA API Server")
     info(f"Model:  {active_name} ({model_path.name})")
@@ -431,11 +480,11 @@ def cmd_start(args: list = None):
     info(f"Port:   {PORT}")
 
     step(1, "Starting FastAPI server...")
-    started = start_server_fn(model_path, admin_key, model_cfg, preset=preset_arg)
+    started = start_server_fn(model_path, admin_key, model_cfg, preset=preset_arg, system_prompt=system_prompt_arg)
     if not started:
         warn("Retrying server start...")
         time.sleep(3)
-        started = start_server_fn(model_path, admin_key, model_cfg, preset=preset_arg)
+        started = start_server_fn(model_path, admin_key, model_cfg, preset=preset_arg, system_prompt=system_prompt_arg)
     
     if started:
         ok(f"Server listening on port {PORT}")
@@ -516,7 +565,7 @@ def cmd_start(args: list = None):
                     except Exception: pass
                 proc_restart_attempts += 1
                 time.sleep(min(30, 2 ** proc_restart_attempts))
-                if start_server_fn(model_path, admin_key, model_cfg, preset=preset_arg):
+                if start_server_fn(model_path, admin_key, model_cfg, preset=preset_arg, system_prompt=system_prompt_arg):
                     proc_restart_attempts = 0
 
             if is_server_healthy_fn(PORT):
@@ -530,7 +579,7 @@ def cmd_start(args: list = None):
                             current_server_proc.terminate()
                             current_server_proc.wait(5)
                         except Exception: pass
-                    if start_server_fn(model_path, admin_key, model_cfg, preset=preset_arg):
+                    if start_server_fn(model_path, admin_key, model_cfg, preset=preset_arg, system_prompt=system_prompt_arg):
                         health_miss_streak = 0
 
             current_tunnel_proc = _get_attr("_tunnel_proc", _tunnel_proc)

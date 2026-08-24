@@ -99,27 +99,102 @@ def install_deps():
     run_pip(packages)
     ok("Dependencies ready")
 
-def choose_model(auto: Optional[str] = None) -> Dict[str, str]:
-    if auto and auto in MODELS:
-        key = auto
-        cfg = dict(MODELS[key])
-    elif auto and "/" in auto:
-        repo_name = auto.split("/")[-1]
-        cfg = {
+def parse_model_target(target: Optional[str]) -> Dict[str, str]:
+    """
+    Parses any model input string:
+    - Direct HuggingFace URL: https://huggingface.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED/blob/main/Qwen3.8-27B-OBLITERATED-Q4_K_M.gguf
+    - GGUF with repo: OBLITERATUS/Qwen3.8-27B-OBLITERATED:Qwen3.8-27B-OBLITERATED-Q4_K_M.gguf
+    - GGUF 3-part path: OBLITERATUS/Qwen3.8-27B-OBLITERATED/Qwen3.8-27B-OBLITERATED-Q4_K_M.gguf
+    - Standard HuggingFace repo: Qwen/Qwen2.5-7B-Instruct
+    - Built-in quant profile: auto, 4bit, 8bit, 16bit, q4_k_m, etc.
+    """
+    if not target:
+        return dict(MODELS["auto"])
+
+    target = target.strip()
+
+    # 1. HuggingFace URL
+    if "huggingface.co/" in target:
+        cleaned = target.split("huggingface.co/")[-1].strip("/")
+        parts = cleaned.split("/")
+        if len(parts) >= 2:
+            repo_id = f"{parts[0]}/{parts[1]}"
+            filename = "model.safetensors.index.json"
+            if len(parts) >= 5 and parts[2] in ("blob", "resolve", "raw"):
+                filename = "/".join(parts[4:])
+            elif len(parts) == 3 and parts[2].endswith(".gguf"):
+                filename = parts[2]
+
+            is_gguf = filename.endswith(".gguf")
+            model_name = parts[1]
+            return {
+                "name": model_name,
+                "repo": repo_id,
+                "repo_gguf": repo_id if is_gguf else None,
+                "file": filename,
+                "dir": model_name,
+                "description": f"HuggingFace Model: {repo_id} ({filename if is_gguf else 'Safetensors'})",
+                "quant": "q4_k_m" if is_gguf else "auto",
+            }
+
+    # 2. repo:filename format
+    if ":" in target and not target.startswith("http"):
+        repo_id, filename = target.split(":", 1)
+        model_name = repo_id.split("/")[-1]
+        is_gguf = filename.endswith(".gguf")
+        return {
+            "name": model_name,
+            "repo": repo_id,
+            "repo_gguf": repo_id if is_gguf else None,
+            "file": filename,
+            "dir": model_name,
+            "description": f"HuggingFace Model: {repo_id} ({filename})",
+            "quant": "q4_k_m" if is_gguf else "auto",
+        }
+
+    # 3. repo/filename.gguf format
+    if target.count("/") == 2 and target.endswith(".gguf"):
+        parts = target.split("/")
+        repo_id = f"{parts[0]}/{parts[1]}"
+        filename = parts[2]
+        model_name = parts[1]
+        return {
+            "name": model_name,
+            "repo": repo_id,
+            "repo_gguf": repo_id,
+            "file": filename,
+            "dir": model_name,
+            "description": f"HuggingFace GGUF Model: {repo_id} ({filename})",
+            "quant": "q4_k_m",
+        }
+
+    # 4. Standard HuggingFace repo (owner/model)
+    if "/" in target:
+        repo_name = target.split("/")[-1]
+        return {
             "name": repo_name,
-            "repo": auto,
+            "repo": target,
             "dir": repo_name,
-            "description": f"Custom HuggingFace Model: {auto}",
+            "file": "model.safetensors.index.json",
+            "description": f"Custom HuggingFace Model: {target}",
             "quant": "auto",
         }
-        save_state({"model_key": auto, "model_repo": auto, "model_name": repo_name})
-        return cfg
-    else:
-        key = "auto"
-        cfg = dict(MODELS[key])
 
+    # 5. Built-in profile key
+    if target in MODELS:
+        return dict(MODELS[target])
+
+    return dict(MODELS["auto"])
+
+def choose_model(auto: Optional[str] = None) -> Dict[str, str]:
+    cfg = parse_model_target(auto)
     info(f"Selected profile: {cfg['description']}")
-    save_state({"model_key": key})
+    save_state({
+        "model_key": auto or "auto",
+        "model_repo": cfg.get("repo", HF_REPO),
+        "model_name": cfg.get("name", "NAA-AI-Model"),
+        "model_file": cfg.get("file", "model.safetensors.index.json"),
+    })
     return cfg
 
 def is_model_complete(model_path: Path, model_cfg: Dict[str, str] = None) -> bool:
@@ -146,21 +221,21 @@ def is_model_complete(model_path: Path, model_cfg: Dict[str, str] = None) -> boo
 def download_model(model_cfg: Dict[str, str]) -> Path:
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
     filename = model_cfg.get("file", "model.safetensors.index.json")
-    repo_id = model_cfg.get("repo", HF_REPO)
+    repo_id = model_cfg.get("repo_gguf") or model_cfg.get("repo", HF_REPO)
     model_dir_name = model_cfg.get("dir", repo_id.split("/")[-1])
 
-    if filename.endswith(".gguf") and "repo_gguf" in model_cfg:
+    if filename.endswith(".gguf"):
         dest_file = MODEL_DIR / filename
         if dest_file.exists() and dest_file.stat().st_size > 1e6:
             size_gb = dest_file.stat().st_size / 1e9
             ok(f"Model already present: {dest_file.name} ({size_gb:.2f} GB)")
             return dest_file
 
-        header(f"Downloading GGUF Model ({filename})")
+        header(f"Downloading GGUF Model ({filename}) from {repo_id}")
         try:
             from huggingface_hub import hf_hub_download
             kwargs = {
-                "repo_id": model_cfg.get("repo_gguf", repo_id),
+                "repo_id": repo_id,
                 "filename": filename,
                 "local_dir": str(MODEL_DIR),
                 "local_dir_use_symlinks": False,

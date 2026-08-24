@@ -1,5 +1,5 @@
 """
-Tests for NAA CLI environment detection, state persistence, model selection, and helper functions.
+Tests for NAA CLI environment detection, state persistence, model selection, URL parsing, and helper functions.
 """
 
 from pathlib import Path
@@ -32,6 +32,29 @@ def test_choose_model():
     m_custom = cli.choose_model("Qwen/Qwen2.5-7B-Instruct")
     assert m_custom["name"] == "Qwen2.5-7B-Instruct"
     assert m_custom["repo"] == "Qwen/Qwen2.5-7B-Instruct"
+
+def test_parse_model_target_huggingface_url():
+    url = "https://huggingface.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED/blob/main/Qwen3.8-27B-OBLITERATED-Q4_K_M.gguf"
+    cfg = cli.parse_model_target(url)
+    assert cfg["name"] == "Qwen3.8-27B-OBLITERATED"
+    assert cfg["repo"] == "OBLITERATUS/Qwen3.8-27B-OBLITERATED"
+    assert cfg["file"] == "Qwen3.8-27B-OBLITERATED-Q4_K_M.gguf"
+    assert cfg["quant"] == "q4_k_m"
+
+def test_parse_model_target_colon_syntax():
+    target = "OBLITERATUS/Qwen3.8-27B-OBLITERATED:Qwen3.8-27B-OBLITERATED-Q4_K_M.gguf"
+    cfg = cli.parse_model_target(target)
+    assert cfg["name"] == "Qwen3.8-27B-OBLITERATED"
+    assert cfg["repo"] == "OBLITERATUS/Qwen3.8-27B-OBLITERATED"
+    assert cfg["file"] == "Qwen3.8-27B-OBLITERATED-Q4_K_M.gguf"
+    assert cfg["quant"] == "q4_k_m"
+
+def test_parse_model_target_path_syntax():
+    target = "OBLITERATUS/Qwen3.8-27B-OBLITERATED/Qwen3.8-27B-OBLITERATED-Q4_K_M.gguf"
+    cfg = cli.parse_model_target(target)
+    assert cfg["name"] == "Qwen3.8-27B-OBLITERATED"
+    assert cfg["repo"] == "OBLITERATUS/Qwen3.8-27B-OBLITERATED"
+    assert cfg["file"] == "Qwen3.8-27B-OBLITERATED-Q4_K_M.gguf"
 
 def test_state_persistence(tmp_path: Path, monkeypatch):
     test_state_file = tmp_path / ".test_naa_state.json"

@@ -174,6 +174,29 @@ def install_deps():
     run_pip(packages)
     ok("Dependencies ready")
 
+def ensure_gguf_deps() -> bool:
+    try:
+        import llama_cpp
+        return True
+    except ImportError:
+        header("Installing llama-cpp-python for GGUF support")
+        if ENV.get("is_gpu", False):
+            info("Detected GPU environment. Installing CUDA prebuilt wheel...")
+            success = run_pip(
+                ["llama-cpp-python>=0.2.80"],
+                extra_args=["--extra-index-url", "https://abetlen.github.io/llama-cpp-python/whl/cu121"]
+            )
+        else:
+            info("Installing CPU llama-cpp-python wheel...")
+            success = run_pip(["llama-cpp-python>=0.2.80"])
+
+        if success:
+            ok("llama-cpp-python installed successfully!")
+            return True
+        else:
+            warn("Failed to install prebuilt wheel, trying fallback standard install...")
+            return run_pip(["llama-cpp-python"])
+
 def parse_model_target(target: Optional[str]) -> Dict[str, str]:
     """
     Parses any model input string:
@@ -482,12 +505,16 @@ def cmd_setup(args: list = None):
     target_arg = parsed.get("model")
     print_banner(target_arg)
     header("Setup")
-    install_deps()
     choose_model_fn = _get_attr("choose_model", choose_model)
     download_model_fn = _get_attr("download_model", download_model)
     save_state_fn = _get_attr("save_state", save_state)
+    ensure_gguf_deps_fn = _get_attr("ensure_gguf_deps", ensure_gguf_deps)
 
     model_cfg = choose_model_fn(auto=target_arg)
+    install_deps()
+    if model_cfg.get("file", "").endswith(".gguf") or model_cfg.get("quant", "").startswith("q"):
+        ensure_gguf_deps_fn()
+
     model_path = download_model_fn(model_cfg)
     model_key = target_arg or "auto"
     save_state_fn({
@@ -509,6 +536,7 @@ def cmd_start(args: list = None):
     start_keepalive_fn = _get_attr("start_keepalive", start_keepalive)
     is_server_healthy_fn = _get_attr("_is_server_healthy", is_server_healthy)
     public_health_ok_fn = _get_attr("_public_health_ok", public_health_ok)
+    ensure_gguf_deps_fn = _get_attr("ensure_gguf_deps", ensure_gguf_deps)
 
     state = load_state_fn()
     parsed = _parse_cli_args(args)
@@ -521,6 +549,8 @@ def cmd_start(args: list = None):
     model_path_str = state.get("model_path") if not model_arg else None
 
     model_cfg = choose_model_fn(auto=model_key)
+    if model_cfg.get("file", "").endswith(".gguf") or model_cfg.get("quant", "").startswith("q"):
+        ensure_gguf_deps_fn()
 
     if model_path_str and Path(model_path_str).exists() and is_model_complete(Path(model_path_str), model_cfg):
         model_path = Path(model_path_str)

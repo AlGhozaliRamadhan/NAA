@@ -39,7 +39,7 @@ class ChatMessage(BaseModel):
     role: str
     content: str
 
-def build_chatml_prompt(messages: List[ChatMessage], default_system: Optional[str] = CANONICAL_SYSTEM_PROMPT) -> str:
+def build_chatml_prompt(messages: List[ChatMessage], default_system: Optional[str] = None) -> str:
     """
     Constructs ChatML prompt format with customizable system prompt.
     """

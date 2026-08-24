@@ -49,6 +49,15 @@ def test_chatml_formatting_structure():
     assert "<|im_start|>user\nFollowup question.<|im_end|>\n" in prompt
     assert prompt.endswith("<|im_start|>assistant\n")
 
+def test_chatml_formatting_no_system_injection_by_default():
+    messages = [
+        ChatMessage(role="user", content="User prompt without system."),
+    ]
+    prompt = build_chat_prompt(messages)
+    assert "<|im_start|>system" not in prompt
+    assert prompt == "<|im_start|>user\nUser prompt without system.<|im_end|>\n<|im_start|>assistant\n"
+
+
 def test_prepare_chat_messages_presets():
     # 1. Clean passthrough for standard models when preset='default'
     raw_msgs = [{"role": "user", "content": "Hello standard AI"}]

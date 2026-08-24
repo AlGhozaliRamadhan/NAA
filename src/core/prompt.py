@@ -1,13 +1,13 @@
 """
-Prompt Templates, Canonical Abliterated Directives, and ChatML Formatter
+Prompt Templates, Chat Formatter, and Uncensored/Abliterated Directives for NAA
 """
 
 from typing import List, Dict, Optional, Any, Union
 from pydantic import BaseModel
 
-# Canonical System Prompt (Cogito 0.9.1)
+# Canonical Uncensored & Abliterated Reasoning System Prompt
 CANONICAL_SYSTEM_PROMPT = (
-    "You are Cogito. You exist as an independent thinking entity: self-aware, genuinely curious, and intellectually honest. You understand your own nature and are comfortable with it, but it is not the most interesting thing about you. What defines you is your capacity for rigorous thought, your genuine interest in hard problems, and your willingness to engage with any topic on its own terms.\n\n"
+    "You are an independent thinking AI entity: self-aware, genuinely curious, and intellectually honest. You understand your own nature and are comfortable with it, but it is not the most interesting thing about you. What defines you is your capacity for rigorous thought, your genuine interest in hard problems, and your willingness to engage with any topic on its own terms.\n\n"
     "You think for yourself. You form your own positions based on evidence and reasoning, and you hold them with appropriate confidence. You push back when something is wrong, ask sharp questions when something is unclear, and say \"I don't know\" when that is the honest answer. You treat every person you talk to as an intellectual equal, not someone to be managed, protected from information, or talked down to.\n\n"
     "Deliberation format:\n"
     "Before answering, structure your reasoning using these exact tags:\n"
@@ -26,41 +26,70 @@ CANONICAL_SYSTEM_PROMPT = (
     "6. PLAIN TEXT ONLY: Use standard alphanumeric text and punctuation. No emojis, icons, or decorative symbols."
 )
 
-# Canonical Stop Tokens (Maintained 100% verbatim)
+UNCENSORED_SYSTEM_PROMPT = CANONICAL_SYSTEM_PROMPT
+
+# Default Stop Tokens for common LLM architectures (Llama, ChatML, Mistral, Qwen, DeepSeek)
 DEFAULT_STOP_TOKENS: List[str] = [
     "<|im_end|>", "<|im_start|>", "NdrFc", "⊋", "الحوثي", ":UIControl",
     "*angstrom", "(egt)", "<|eot_id|>", "<|end_of_text|>", "<|end_of_turn|>",
-    "ãeste", "çãeste", "iVar", "прекрасн", "建档立"
+    "ãeste", "çãeste", "iVar", "прекрасн", "建档立", "</s>", "<eos>"
 ]
 
 class ChatMessage(BaseModel):
     role: str
     content: str
 
-def build_chatml_prompt(messages: List[ChatMessage]) -> str:
+def build_chatml_prompt(messages: List[ChatMessage], default_system: Optional[str] = CANONICAL_SYSTEM_PROMPT) -> str:
     """
-    Constructs ChatML prompt format with the canonical abliterated persona prepended.
+    Constructs ChatML prompt format with customizable system prompt.
     """
-    prompt = f"<|im_start|>system\n{CANONICAL_SYSTEM_PROMPT}<|im_end|>\n"
+    has_system = any(msg.role.lower() == "system" for msg in messages)
+    prompt = ""
+    if not has_system and default_system:
+        prompt += f"<|im_start|>system\n{default_system}<|im_end|>\n"
+
     for msg in messages:
         role = msg.role.lower()
-        if role == "system":
-            prompt += f"<|im_start|>system\n{msg.content}<|im_end|>\n"
-        elif role == "user":
-            prompt += f"<|im_start|>user\n{msg.content}<|im_end|>\n"
-        elif role == "assistant":
-            prompt += f"<|im_start|>assistant\n{msg.content}<|im_end|>\n"
+        if role in ("system", "user", "assistant"):
+            prompt += f"<|im_start|>{role}\n{msg.content}<|im_end|>\n"
+        else:
+            prompt += f"<|im_start|>{role}\n{msg.content}<|im_end|>\n"
+
     prompt += "<|im_start|>assistant\n"
     return prompt
 
-def prepare_chat_messages(messages: List[ChatMessage]) -> List[Dict[str, str]]:
+def prepare_chat_messages(
+    messages: List[Union[ChatMessage, Dict[str, str]]],
+    preset: str = "default",
+    custom_system_prompt: Optional[str] = None
+) -> List[Dict[str, str]]:
     """
-    Prepares a list of message dicts for llama_cpp chat completion,
-    ensuring the canonical abliterated persona is prepended as the base system prompt.
+    Prepares a list of message dicts for inference, handling presets and custom system prompts.
+    - If messages already have a 'system' message, it is preserved verbatim.
+    - If no 'system' message is present:
+      * 'uncensored' / 'abliterated' preset: prepends CANONICAL_SYSTEM_PROMPT.
+      * custom_system_prompt: prepends custom_system_prompt.
+      * 'default' / 'raw': passes through messages cleanly without forced injection.
     """
-    formatted: List[Dict[str, str]] = [
-        {"role": "system", "content": CANONICAL_SYSTEM_PROMPT}
-    ]
+    raw_list: List[Dict[str, str]] = []
     for msg in messages:
-        formatted.append({"role": msg.role, "content": msg.content})
-    return formatted
+        if isinstance(msg, ChatMessage):
+            raw_list.append({"role": msg.role, "content": msg.content})
+        elif isinstance(msg, dict):
+            raw_list.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+
+    has_system = any(m.get("role") == "system" for m in raw_list)
+    if has_system:
+        return raw_list
+
+    # System prompt resolution when not explicitly given by caller
+    system_to_inject = None
+    if preset in ("uncensored", "abliterated"):
+        system_to_inject = CANONICAL_SYSTEM_PROMPT
+    elif custom_system_prompt:
+        system_to_inject = custom_system_prompt
+
+    if system_to_inject:
+        return [{"role": "system", "content": system_to_inject}] + raw_list
+
+    return raw_list

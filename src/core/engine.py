@@ -1,5 +1,5 @@
 """
-GGUF Inference Engine: Model Lifecycle, Hardware Offloading, and Non-blocking Execution
+Universal AI Inference Engine: Model Lifecycle, Hardware Offloading, and Non-blocking Execution for NAA
 """
 
 import os
@@ -11,7 +11,7 @@ import asyncio
 from pathlib import Path
 from typing import Optional, Dict, Any, List, AsyncGenerator, Tuple, Union
 
-logger = logging.getLogger("cogito-engine")
+logger = logging.getLogger("naa-engine")
 
 try:
     import llama_cpp
@@ -25,14 +25,20 @@ from src.core.prompt import DEFAULT_STOP_TOKENS, CANONICAL_SYSTEM_PROMPT, ChatMe
 
 class InferenceEngine:
     """
-    High-performance GGUF Inference Engine powered by llama.cpp C++ backend.
-    Supports GPU offloading, FlashAttention, context caching, and non-blocking streaming.
+    Universal Inference Engine supporting any AI Model:
+    - GGUF models via llama.cpp C++ backend
+    - HuggingFace Safetensors / PyTorch models via Transformers (AutoModelForCausalLM)
+    - 4-bit NF4, 8-bit Int8, and FP16/BF16 GPU quantization
+    - FlashAttention, context caching, and non-blocking streaming with cancellation
     """
 
     def __init__(
         self,
         model_path: str,
-        quant_mode: str = "q4_k_m",
+        model_name: Optional[str] = None,
+        quant_mode: str = "auto",
+        preset: str = "default",
+        system_prompt: Optional[str] = None,
         n_ctx: int = 32768,
         n_gpu_layers: int = -1,
         flash_attn: bool = True,
@@ -41,7 +47,10 @@ class InferenceEngine:
         trust_remote_code: bool = True,
     ):
         self.model_path = Path(model_path)
+        self.model_name = model_name or self._derive_model_name(model_path)
         self.quant_mode = quant_mode
+        self.preset = preset
+        self.system_prompt = system_prompt
         self.n_ctx = n_ctx
         self.n_gpu_layers = n_gpu_layers
         self.flash_attn = flash_attn
@@ -50,18 +59,24 @@ class InferenceEngine:
         self.trust_remote_code = trust_remote_code
 
         self.model: Optional[Any] = None
-        self.tokenizer: Optional[Any] = None  # Maintained for mock/compatibility
+        self.tokenizer: Optional[Any] = None
         self.model_loaded: bool = False
         self.model_loading: bool = False
         self.lock = threading.Lock()
         self.ready_event = threading.Event()
+
+    def _derive_model_name(self, path_or_repo: str) -> str:
+        p = Path(path_or_repo)
+        if p.name and p.name not in (".", ""):
+            return p.name.replace(".gguf", "")
+        return "NAA-AI-Model"
 
     def load(self):
         """Loads the model into GPU VRAM / system memory (Safetensors / GGUF)."""
         if self.model_loaded or self.model_loading:
             return
         self.model_loading = True
-        logger.info(f"Loading model from: {self.model_path} (quant={self.quant_mode})")
+        logger.info(f"Loading model '{self.model_name}' from: {self.model_path} (quant={self.quant_mode})")
 
         try:
             model_path_str = str(self.model_path)
@@ -85,12 +100,12 @@ class InferenceEngine:
                     verbose=False,
                 )
             else:
-                # Load normal Safetensors / Hugging Face model
+                # Load Safetensors / Hugging Face model
                 try:
                     import torch
                     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-                    logger.info(f"Initializing Transformers with Safetensors from: {model_path_str}")
+                    logger.info(f"Initializing Transformers from: {model_path_str}")
                     self.tokenizer = AutoTokenizer.from_pretrained(
                         model_path_str,
                         trust_remote_code=self.trust_remote_code,
@@ -156,16 +171,11 @@ class InferenceEngine:
         Non-blocking streaming chat completion generator with instant cancellation.
         """
         stop_list = get_combined_stop_tokens(custom_stops)
-        
-        # Prepare structured messages with canonical persona
-        if messages and isinstance(messages[0], ChatMessage):
-            formatted_messages = prepare_chat_messages(messages)
-        else:
-            has_system = any(m.get("role") == "system" for m in messages)
-            formatted_messages = []
-            if not has_system:
-                formatted_messages.append({"role": "system", "content": CANONICAL_SYSTEM_PROMPT})
-            formatted_messages.extend(messages)
+        formatted_messages = prepare_chat_messages(
+            messages,
+            preset=self.preset,
+            custom_system_prompt=self.system_prompt,
+        )
 
         loop = asyncio.get_running_loop()
         q: asyncio.Queue = asyncio.Queue()
@@ -193,11 +203,17 @@ class InferenceEngine:
                     import torch
                     from transformers import TextIteratorStreamer
 
-                    prompt_text = self.tokenizer.apply_chat_template(
-                        formatted_messages,
-                        tokenize=False,
-                        add_generation_prompt=True,
-                    )
+                    if hasattr(self.tokenizer, "apply_chat_template"):
+                        prompt_text = self.tokenizer.apply_chat_template(
+                            formatted_messages,
+                            tokenize=False,
+                            add_generation_prompt=True,
+                        )
+                    else:
+                        from src.core.prompt import build_chatml_prompt
+                        chat_msgs = [ChatMessage(role=m.get("role", "user"), content=m.get("content", "")) for m in formatted_messages]
+                        prompt_text = build_chatml_prompt(chat_msgs)
+
                     inputs = self.tokenizer(prompt_text, return_tensors="pt")
                     if hasattr(self.model, "device"):
                         inputs = inputs.to(self.model.device)
@@ -218,7 +234,7 @@ class InferenceEngine:
                         "top_k": top_k if temperature > 0 else 50,
                         "repetition_penalty": repeat_penalty,
                         "do_sample": temperature > 0,
-                        "pad_token_id": self.tokenizer.eos_token_id,
+                        "pad_token_id": getattr(self.tokenizer, "eos_token_id", None),
                     }
 
                     gen_thread = threading.Thread(
@@ -290,15 +306,11 @@ class InferenceEngine:
         Non-blocking execution of complete chat completion.
         """
         stop_list = get_combined_stop_tokens(custom_stops)
-        
-        if messages and isinstance(messages[0], ChatMessage):
-            formatted_messages = prepare_chat_messages(messages)
-        else:
-            has_system = any(m.get("role") == "system" for m in messages)
-            formatted_messages = []
-            if not has_system:
-                formatted_messages.append({"role": "system", "content": CANONICAL_SYSTEM_PROMPT})
-            formatted_messages.extend(messages)
+        formatted_messages = prepare_chat_messages(
+            messages,
+            preset=self.preset,
+            custom_system_prompt=self.system_prompt,
+        )
 
         def _run():
             if hasattr(self.model, "create_chat_completion"):
@@ -315,11 +327,17 @@ class InferenceEngine:
                 )
             elif self.tokenizer is not None and hasattr(self.model, "generate"):
                 import torch
-                prompt_text = self.tokenizer.apply_chat_template(
-                    formatted_messages,
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
+                if hasattr(self.tokenizer, "apply_chat_template"):
+                    prompt_text = self.tokenizer.apply_chat_template(
+                        formatted_messages,
+                        tokenize=False,
+                        add_generation_prompt=True,
+                    )
+                else:
+                    from src.core.prompt import build_chatml_prompt
+                    chat_msgs = [ChatMessage(role=m.get("role", "user"), content=m.get("content", "")) for m in formatted_messages]
+                    prompt_text = build_chatml_prompt(chat_msgs)
+
                 inputs = self.tokenizer(prompt_text, return_tensors="pt")
                 if hasattr(self.model, "device"):
                     inputs = inputs.to(self.model.device)
@@ -333,7 +351,7 @@ class InferenceEngine:
                     "top_k": top_k if temperature > 0 else 50,
                     "repetition_penalty": repeat_penalty,
                     "do_sample": temperature > 0,
-                    "pad_token_id": self.tokenizer.eos_token_id,
+                    "pad_token_id": getattr(self.tokenizer, "eos_token_id", None),
                 }
                 outputs = self.model.generate(**gen_kwargs)
                 gen_tokens = outputs[0][inputs["input_ids"].shape[1]:]
@@ -342,7 +360,7 @@ class InferenceEngine:
                     "id": f"chatcmpl-{int(time.time())}",
                     "object": "chat.completion",
                     "created": int(time.time()),
-                    "model": "Cogito-0.9.1-15B",
+                    "model": self.model_name,
                     "choices": [{
                         "index": 0,
                         "message": {"role": "assistant", "content": response_text},
@@ -360,7 +378,7 @@ class InferenceEngine:
                     "id": f"chatcmpl-{int(time.time())}",
                     "object": "chat.completion",
                     "created": int(time.time()),
-                    "model": "Cogito-0.9.1-15B",
+                    "model": self.model_name,
                     "choices": [{
                         "index": 0,
                         "message": {"role": "assistant", "content": "<think>\nVerified reasoning.\n</think>\nComplete output."},
@@ -432,7 +450,7 @@ class InferenceEngine:
                         "top_k": top_k if temperature > 0 else 50,
                         "repetition_penalty": repeat_penalty,
                         "do_sample": temperature > 0,
-                        "pad_token_id": self.tokenizer.eos_token_id,
+                        "pad_token_id": getattr(self.tokenizer, "eos_token_id", None),
                     }
 
                     gen_thread = threading.Thread(
@@ -526,7 +544,7 @@ class InferenceEngine:
                     "top_k": top_k if temperature > 0 else 50,
                     "repetition_penalty": repeat_penalty,
                     "do_sample": temperature > 0,
-                    "pad_token_id": self.tokenizer.eos_token_id,
+                    "pad_token_id": getattr(self.tokenizer, "eos_token_id", None),
                 }
                 outputs = self.model.generate(**gen_kwargs)
                 gen_tokens = outputs[0][inputs["input_ids"].shape[1]:]
@@ -535,7 +553,7 @@ class InferenceEngine:
                     "id": f"cmpl-{int(time.time())}",
                     "object": "text_completion",
                     "created": int(time.time()),
-                    "model": "Cogito-0.9.1-15B",
+                    "model": self.model_name,
                     "choices": [{"text": response_text, "index": 0, "finish_reason": "stop"}],
                     "usage": {
                         "prompt_tokens": int(inputs["input_ids"].shape[1]),
@@ -548,7 +566,7 @@ class InferenceEngine:
                     "id": f"cmpl-{int(time.time())}",
                     "object": "text_completion",
                     "created": int(time.time()),
-                    "model": "Cogito-0.9.1-15B",
+                    "model": self.model_name,
                     "choices": [{"text": " Generated completion text.", "index": 0, "finish_reason": "stop"}],
                     "usage": {"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30}
                 }

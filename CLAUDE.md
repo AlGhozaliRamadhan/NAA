@@ -4,65 +4,59 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Cogito-0.9.1-15B is a self-hosted, OpenAI-compatible REST API that serves the `Cogito-0.9.1-15B-GGUF` model (HF repo `ozaa77/Cogito-0.9.1-15B-GGUF`) through high-performance `llama-cpp-python` and native C++ GGML/CUDA backends with FlashAttention and context caching. It is consumed by external clients -- including frontend AI agents that ask questions over this API -- so OpenAI wire-compatibility (paths, SSE streaming, response shapes) matters.
-
-The model is a 15B parameter reasoning model in GGUF format. It supports:
-- **`auto` mode**: defaults to Q4_K_M (~8.85 GB weight size), fitting comfortably in single 12-16 GB GPUs (Kaggle/Colab T4, RTX 3060/4060Ti/4070/4080) with full 32k context support.
-- **`4bit` / `q4_k_m` mode**: 4-bit medium quantization (~8.85 GB VRAM).
-- **`5bit` / `q5_k_m` mode**: 5-bit medium quantization (~10.6 GB VRAM).
-- **`8bit` / `q8_0` mode**: 8-bit quantization (~16.1 GB VRAM, near lossless).
-- **`16bit` / `f16` mode**: full precision float16 (~30.8 GB VRAM).
-
-The critical engineering invariant: preserve all 9 directives of the abliterated system prompt, the `<think>` reasoning format, and the canonical stop tokens.
+NAA (Notebooks AI API) is a self-hosted, universal, OpenAI-compatible REST API server tailored for running any LLM on Kaggle, Google Colab, or local systems with GPU/CPU hardware. It supports:
+- Hugging Face Safetensors / PyTorch models (via `AutoModelForCausalLM` and `AutoTokenizer` with 4-bit NF4 double quantization, 8-bit Int8, and FP16/BF16).
+- GGUF models (via `llama_cpp.Llama` with GPU offloading and FlashAttention).
+- Full OpenAI wire-compatibility (endpoints, streaming SSE with heartbeats, response schemas, error shapes).
+- Native chat templates and uncensored/abliterated presets with epistemic deliberation tags (`<confidence>`, `<thought>`, `<action>`).
+- Zero-config Cloudflare Quick Tunnel and self-healing watchdog supervision.
 
 ## Common commands
 
 ```bash
-# Run the test suite
+# Run the automated test suite
 pytest -v
 
-# Run the all-in-one manager
-python cogito.py setup        # install deps + download GGUF model (auto/Q4_K_M profile)
-python cogito.py setup q4_k_m # configure Q4_K_M quantization profile
-python cogito.py setup q5_k_m # configure Q5_K_M quantization profile
-python cogito.py setup q8_0   # configure Q8_0 quantization profile
-python cogito.py start        # start server + tunnel; blocks and auto-restarts both
-python cogito.py keys         # interactive key manager (needs a TTY)
-python cogito.py status       # show URL, admin key, model, health
+# Run the primary CLI manager
+python naa.py setup             # install dependencies + download model
+python naa.py setup 4bit        # setup with 4-bit NF4 quantization
+python naa.py setup 8bit        # setup with 8-bit Int8 quantization
+python naa.py setup 16bit       # setup with full precision
+python naa.py start             # start server + Cloudflare tunnel + watchdog supervisor
+python naa.py keys              # interactive API key manager
+python naa.py status            # show public URL, admin key, loaded model, GPU, and health
 ```
 
 ```bash
-# Standalone server
+# Standalone server launch
 pip install -r requirements.txt
 python -m src.server.app
 ```
 
 ## Architecture
 
-The codebase is organized into clean, modular packages under `src/`:
+The codebase is organized into modular packages under `src/`:
 
-- `src/config.py`: Environment and GPU detection (`detect_env`), GGUF model profiles, typed settings.
-- `src/core/prompt.py`: Canonical abliterated system prompt, 9 directives, stop tokens, ChatML prompt builder, and structured message formatter.
-- `src/core/stop_criteria.py`: Native C++ stop list resolution and fallback stopping criteria.
+- `src/config.py`: Platform and GPU detection (`detect_env`), model profiles, typed settings.
+- `src/core/prompt.py`: Canonical uncensored/abliterated directives, preset resolution (`prepare_chat_messages`), stop tokens, and ChatML formatting.
+- `src/core/stop_criteria.py`: Native stop list resolution and fallback token window matching.
 - `src/core/key_manager.py`: Thread-safe `APIKeyManager` with in-memory dirty tracking, periodic 30s background flusher, and atomic disk persistence.
-- `src/core/engine.py`: `InferenceEngine` handling GGUF lifecycle via `llama_cpp.Llama`, GPU layer offloading (`n_gpu_layers=-1`), FlashAttention, and non-blocking streaming.
+- `src/core/engine.py`: `InferenceEngine` handling model lifecycle (Safetensors / GGUF), GPU offloading, FlashAttention, and non-blocking streaming.
 - `src/server/app.py`: FastAPI application factory (`create_app`), CORS, GZip, and OpenAI-compatible error formatting.
-- `src/server/schemas.py`: OpenAI-compatible Pydantic request/response schemas (with `min_p: 0.05`, `temperature: 0.70`, `top_p: 0.90`, `repeat_penalty: 1.08`).
+- `src/server/schemas.py`: OpenAI-compatible Pydantic request/response schemas.
 - `src/server/routes/`: Modular route handlers (`health.py`, `models.py`, `chat.py`, `completions.py`, `admin.py`).
 - `src/tunnel/cloudflare.py`: Cloudflare Quick Tunnel binary manager and public URL resolution.
 - `src/supervisor/watchdog.py`: Keepalive thread and supervisor watchdog.
-- `src/cli.py`: Unified CLI management interface for single-file GGUF management.
+- `src/cli.py`: Unified CLI management interface.
+- `naa.py`: Primary notebook and CLI runner.
 
-## Output Taming & Safety
+## Output Handling & Streaming Safety
 
-In `src/core/prompt.py`, `prepare_chat_messages()` prepends the canonical system prompt and structures turns in ChatML format.
-
-- Stop tokens: `<|im_end|>`, `<|im_start|>`, `NdrFc`, `⊋`, `الحوثي`, `:UIControl`, `*angstrom`, `(egt)`, `<|eot_id|>`, `<|end_of_text|>`, `<|end_of_turn|>`, `ãeste`, `çãeste`, `iVar`, `прекрасн`, `建档立`.
-- Stop token matching is executed directly in `llama.cpp`'s high-speed C++ engine.
-- SSE heartbeats (`: heartbeat\n\n`) and headers (`Connection: close`, `X-Accel-Buffering: no`) prevent Cloudflare 502 Bad Gateway timeouts.
+- SSE heartbeats (`: heartbeat\n\n`) and headers (`Connection: close`, `X-Accel-Buffering: no`) prevent Cloudflare 502 Bad Gateway timeouts during long generations.
 - Active disconnection cancellation terminates background generation immediately if a client disconnects.
+- `<think>...</think>` reasoning tokens are preserved without alteration for reasoning models (DeepSeek-R1, QwQ, etc.).
 
 ## Auth and Keys
 
 - `APIKeyManager` tracks usage in-memory with zero disk latency on the request path, syncing to disk every 30 seconds.
-- All non-health endpoints require a key via Bearer token or `x-api-key` header; admin endpoints additionally require `role == "admin"`. Per-key rate limiting is a fixed 60s sliding window, default 30 RPM.
+- All non-health endpoints require an API key via Bearer token or `x-api-key` header (`naa-...`); admin endpoints require `role == "admin"`.

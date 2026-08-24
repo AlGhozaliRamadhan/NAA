@@ -1,5 +1,5 @@
 """
-Thread-safe API Key Manager with Atomic Disk Persistence and Sliding-Window Rate Limiting
+Thread-safe API Key Manager with Atomic Disk Persistence and Sliding-Window Rate Limiting for NAA
 """
 
 import os
@@ -13,7 +13,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
 
-logger = logging.getLogger("cogito-keys")
+logger = logging.getLogger("naa-keys")
 
 class APIKeyManager:
     """
@@ -42,8 +42,8 @@ class APIKeyManager:
 
     def _ensure_admin_key(self, admin_key: str):
         """Ensure the specified admin key is active in storage."""
-        if not admin_key.startswith("cg-"):
-            admin_key = f"cg-{admin_key}"
+        if not admin_key.startswith("naa-"):
+            admin_key = f"naa-{admin_key}"
         
         admin_keys = [k for k, v in self.keys.items() if v.get("role") == "admin"]
         if not admin_keys:
@@ -118,7 +118,7 @@ class APIKeyManager:
     ) -> Dict[str, Any]:
         """Create and store a new API key."""
         with self.lock:
-            key = key_override or f"cg-{secrets.token_urlsafe(32)}"
+            key = key_override or f"naa-{secrets.token_urlsafe(32)}"
             now = datetime.now(timezone.utc).isoformat()
             record = {
                 "key": key,
@@ -196,7 +196,7 @@ class APIKeyManager:
             for k, v in self.keys.items():
                 entry = v.copy()
                 if not include_key_value:
-                    entry["key"] = k[:8] + "..." + k[-4:] if len(k) > 12 else "cg-***"
+                    entry["key"] = k[:8] + "..." + k[-4:] if len(k) > 12 else "naa-***"
                 result.append(entry)
             return result
 

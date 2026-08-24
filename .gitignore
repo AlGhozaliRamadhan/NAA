@@ -1,4 +1,4 @@
-# ─── Model Weights & Cache ───────────────────────────────────────────────────
+# Model Weights & Cache
 models/
 *.safetensors
 *.gguf
@@ -8,24 +8,24 @@ models/
 *.onnx
 .cache/
 
-# ─── Credentials & Secrets (Never Commit!) ───────────────────────────────────
-cogito_keys.json
+# Credentials & Secrets (Never Commit!)
+naa_keys.json
 api_keys.json
 *.keys.json
 .env
 .env.*
 
-# ─── Runtime State & Logs ─────────────────────────────────────────────────────
-.cogito_state.json
+# Runtime State & Logs
+.naa_state.json
 *.state.json
 *.tmp
 *.tmp.*
 *.log
-cogito_server.log
+naa_server.log
 logs/
-_cogito_server.py
+_naa_server.py
 
-# ─── Python Artifacts ─────────────────────────────────────────────────────────
+# Python Artifacts
 __pycache__/
 *.py[cod]
 *$py.class
@@ -49,14 +49,14 @@ wheels/
 MANIFEST
 pip-wheel-metadata/
 
-# ─── Virtual Environments ─────────────────────────────────────────────────────
+# Virtual Environments
 venv/
 .venv/
 env/
 .env/
 ENV/
 
-# ─── Testing & Coverage ───────────────────────────────────────────────────────
+# Testing & Coverage
 .pytest_cache/
 .coverage
 .coverage.*
@@ -67,7 +67,7 @@ nosetests.xml
 coverage.xml
 *.cover
 
-# ─── Notebooks & IDEs ─────────────────────────────────────────────────────────
+# Notebooks & IDEs
 .ipynb_checkpoints/
 */.ipynb_checkpoints/
 .vscode/
@@ -77,7 +77,7 @@ coverage.xml
 .claude/
 .claude/*
 
-# ─── OS Artifacts ─────────────────────────────────────────────────────────────
+# OS Artifacts
 .DS_Store
 Thumbs.db
 desktop.ini

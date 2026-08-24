@@ -1,12 +1,12 @@
 """
-Tests for /v1/completions (text completions) endpoint (streaming and non-streaming).
+Tests for /v1/completions (text completions) endpoint (streaming and non-streaming) in NAA.
 """
 
 from fastapi.testclient import TestClient
 
 def test_text_completions_non_streaming(client: TestClient, user_headers, mock_engine):
     payload = {
-        "model": "Cogito-0.9.1-15B",
+        "model": "NAA-AI-Model",
         "prompt": "Once upon a time",
         "max_tokens": 50,
         "stream": False,
@@ -21,7 +21,7 @@ def test_text_completions_non_streaming(client: TestClient, user_headers, mock_e
 
 def test_text_completions_streaming(client: TestClient, user_headers, mock_engine):
     payload = {
-        "model": "Cogito-0.9.1-15B",
+        "model": "NAA-AI-Model",
         "prompt": "Explain gravity",
         "stream": True,
     }

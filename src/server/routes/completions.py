@@ -1,5 +1,5 @@
 """
-Text Completions Endpoint (/v1/completions)
+Text Completions Endpoint (/v1/completions) for NAA
 """
 
 import time
@@ -15,7 +15,7 @@ from src.config import settings
 from src.server.schemas import CompletionRequest
 from src.server.auth import get_api_key
 
-logger = logging.getLogger("cogito-completions")
+logger = logging.getLogger("naa-completions")
 router = APIRouter(prefix="/v1", tags=["Completions"])
 
 def ensure_engine_ready(engine):
@@ -38,6 +38,7 @@ async def text_completions(
     custom_stops = [body.stop] if isinstance(body.stop, str) else (body.stop or [])
     request_id = f"cmpl-{uuid.uuid4().hex}"
     created_ts = int(time.time())
+    model_name = body.model if body.model and body.model != "NAA-AI-Model" else getattr(engine, "model_name", settings.model_name)
 
     if body.stream:
         cancel_event = asyncio.Event()
@@ -81,7 +82,7 @@ async def text_completions(
                             "id": request_id,
                             "object": "text_completion",
                             "created": created_ts,
-                            "model": body.model,
+                            "model": model_name,
                             "choices": [{
                                 "text": text,
                                 "index": 0,
@@ -128,7 +129,7 @@ async def text_completions(
         "id": request_id,
         "object": "text_completion",
         "created": created_ts,
-        "model": body.model,
+        "model": model_name,
         "choices": [{"text": text, "index": 0, "finish_reason": finish_reason}],
         "usage": usage,
     }

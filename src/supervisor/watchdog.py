@@ -1,5 +1,5 @@
 """
-Keepalive and Process Supervision
+Keepalive and Process Supervision for NAA
 """
 
 import time
@@ -10,7 +10,7 @@ import urllib.request
 import json
 from typing import Optional, Any
 
-logger = logging.getLogger("cogito-supervisor")
+logger = logging.getLogger("naa-supervisor")
 
 def start_keepalive(port: int):
     def _loop():
@@ -47,7 +47,6 @@ def wait_for_port(port: int, timeout: float = 180.0, proc: Optional[Any] = None)
     deadline = time.time() + timeout
     while time.time() < deadline:
         if proc is not None and hasattr(proc, "poll") and proc.poll() is not None:
-            # Process exited early (crashed or failed to start)
             return False
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=1):

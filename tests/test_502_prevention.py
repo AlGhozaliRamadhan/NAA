@@ -1,6 +1,6 @@
 """
 Automated pytest test for 502 Bad Gateway prevention logic, tunnel startup sequencing,
-and supervisor watchdog process recovery.
+and supervisor watchdog process recovery in NAA.
 """
 
 import sys
@@ -9,7 +9,7 @@ import threading
 from pathlib import Path
 import pytest
 
-import cogito
+import naa
 
 class FakeProc:
     def __init__(self, calls):
@@ -37,16 +37,16 @@ def test_502_prevention_startup_sequencing_and_watchdog(tmp_path: Path, monkeypa
     fake_model_file = tmp_path / "fake.gguf"
     fake_model_file.write_bytes(b"\x00")
 
-    monkeypatch.setattr(cogito, "_download_cloudflared", lambda: "/tmp/cloudflared")
-    monkeypatch.setattr(cogito, "download_model", lambda model: fake_model_file)
+    monkeypatch.setattr(naa, "_download_cloudflared", lambda: "/tmp/cloudflared")
+    monkeypatch.setattr(naa, "download_model", lambda model: fake_model_file)
 
-    def fake_start_server(model_path, admin_key, model_cfg):
+    def fake_start_server(model_path, admin_key, model_cfg, preset="default", system_prompt=None):
         proc = FakeProc(calls)
-        cogito._server_proc = proc
+        naa._server_proc = proc
         calls.append(("start_server",))
         return True
 
-    monkeypatch.setattr(cogito, "start_server", fake_start_server)
+    monkeypatch.setattr(naa, "start_server", fake_start_server)
 
     _state = {"model_loaded": False}
 
@@ -54,30 +54,30 @@ def test_502_prevention_startup_sequencing_and_watchdog(tmp_path: Path, monkeypa
         calls.append(("is_server_healthy", _state["model_loaded"]))
         return _state["model_loaded"]
 
-    monkeypatch.setattr(cogito, "_is_server_healthy", fake_is_server_healthy)
+    monkeypatch.setattr(naa, "_is_server_healthy", fake_is_server_healthy)
 
     def fake_public_health_ok(url, timeout=10.0):
         calls.append(("public_health_ok", url))
         return True
 
-    monkeypatch.setattr(cogito, "_public_health_ok", fake_public_health_ok)
+    monkeypatch.setattr(naa, "_public_health_ok", fake_public_health_ok)
 
     def fake_start_tunnel(port):
         proc = FakeProc(calls)
-        cogito._tunnel_proc = proc
+        naa._tunnel_proc = proc
         calls.append(("start_tunnel",))
         return proc, "https://example.trycloudflare.com"
 
-    monkeypatch.setattr(cogito, "start_tunnel", fake_start_tunnel)
-    monkeypatch.setattr(cogito, "start_keepalive", lambda port: calls.append(("start_keepalive",)))
-    monkeypatch.setattr(cogito, "load_state", lambda: {"model_key": "auto", "model_path": str(fake_model_file), "admin_key": "cg-test"})
-    monkeypatch.setattr(cogito, "save_state", lambda d: calls.append(("save_state", d)))
+    monkeypatch.setattr(naa, "start_tunnel", fake_start_tunnel)
+    monkeypatch.setattr(naa, "start_keepalive", lambda port: calls.append(("start_keepalive",)))
+    monkeypatch.setattr(naa, "load_state", lambda: {"model_key": "auto", "model_path": str(fake_model_file), "admin_key": "naa-test"})
+    monkeypatch.setattr(naa, "save_state", lambda d: calls.append(("save_state", d)))
 
     for fn in ("info", "ok", "warn", "err", "step", "header", "rule", "print_banner"):
-        monkeypatch.setattr(cogito, fn, lambda *a, **k: None)
+        monkeypatch.setattr(naa, fn, lambda *a, **k: None)
 
     # Launch cmd_start in background thread
-    t = threading.Thread(target=cogito.cmd_start, args=([],), daemon=True)
+    t = threading.Thread(target=naa.cmd_start, args=([],), daemon=True)
     t.start()
 
     # Wait for server start probe then flip model_loaded=True
@@ -112,7 +112,7 @@ def test_502_prevention_startup_sequencing_and_watchdog(tmp_path: Path, monkeypa
 
     # Test Watchdog recovery
     calls_before = list(calls)
-    cogito._server_proc._alive = False
+    naa._server_proc._alive = False
 
     # Simulate watchdog tick
     deadline = time.time() + 35

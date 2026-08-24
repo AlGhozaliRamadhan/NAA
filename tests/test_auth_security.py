@@ -1,5 +1,5 @@
 """
-Tests for authentication, authorization, token headers, and security boundaries.
+Tests for authentication, authorization, token headers, and security boundaries in NAA.
 """
 
 from fastapi.testclient import TestClient
@@ -14,7 +14,7 @@ def test_missing_auth_header(client: TestClient):
     assert data["error"]["code"] == 401
 
 def test_invalid_bearer_token(client: TestClient):
-    response = client.get("/v1/models", headers={"Authorization": "Bearer cg-invalid-fake-key-12345"})
+    response = client.get("/v1/models", headers={"Authorization": "Bearer naa-invalid-fake-key-12345"})
     assert response.status_code == 401
     data = response.json()
     assert "error" in data

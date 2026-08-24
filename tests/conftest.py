@@ -1,5 +1,5 @@
 """
-Pytest configuration and shared fixtures for Cogito test suite.
+Pytest configuration and shared fixtures for NAA test suite.
 """
 
 import sys
@@ -24,7 +24,7 @@ class MockTokenizer:
         self._vocab = {
             "<pad>": 0, "<s>": 1, "</s>": 2, "<unk>": 3,
             "<|im_start|>": 10, "<|im_end|>": 11, "<think>": 12, "</think>": 13,
-            "Hello": 20, " world": 21, "!": 22, "Cogito": 23, "is": 24, "here": 25,
+            "Hello": 20, " world": 21, "!": 22, "NAA": 23, "is": 24, "here": 25,
             "NdrFc": 30, "⊋": 31, "stop": 32
         }
         self._rev_vocab = {v: k for k, v in self._vocab.items()}
@@ -63,8 +63,9 @@ class MockTokenizer:
 
 
 class MockModel:
-    def __init__(self):
+    def __init__(self, model_name: str = "NAA-AI-Model"):
         self.device = "cpu"
+        self.model_name = model_name
 
     def create_chat_completion(self, messages, max_tokens=512, stream=False, **kwargs):
         if stream:
@@ -79,7 +80,7 @@ class MockModel:
                 "id": "chatcmpl-mock-12345",
                 "object": "chat.completion",
                 "created": 1700000000,
-                "model": "Cogito-0.9.1-15B",
+                "model": self.model_name,
                 "choices": [{
                     "index": 0,
                     "message": {
@@ -103,7 +104,7 @@ class MockModel:
                 "id": "cmpl-mock-12345",
                 "object": "text_completion",
                 "created": 1700000000,
-                "model": "Cogito-0.9.1-15B",
+                "model": self.model_name,
                 "choices": [{"text": " Verified completion text.", "index": 0, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
             }
@@ -137,8 +138,8 @@ class MockModel:
 
 @pytest.fixture
 def mock_engine() -> InferenceEngine:
-    engine = InferenceEngine(model_path="models/mock", quant_mode="auto")
-    engine.model = MockModel()
+    engine = InferenceEngine(model_path="models/mock", model_name="NAA-AI-Model", quant_mode="auto")
+    engine.model = MockModel("NAA-AI-Model")
     engine.tokenizer = MockTokenizer()
     engine.model_loaded = True
     engine.model_loading = False
@@ -149,7 +150,7 @@ def mock_engine() -> InferenceEngine:
 @pytest.fixture
 def isolated_key_manager(tmp_path: Path) -> APIKeyManager:
     keys_file = tmp_path / "test_keys.json"
-    return APIKeyManager(str(keys_file), admin_key="cg-test-admin-key-123456789")
+    return APIKeyManager(str(keys_file), admin_key="naa-test-admin-key-123456789")
 
 
 @pytest.fixture
@@ -164,7 +165,7 @@ def client(app_instance) -> TestClient:
 
 @pytest.fixture
 def admin_headers() -> Dict[str, str]:
-    return {"Authorization": "Bearer cg-test-admin-key-123456789"}
+    return {"Authorization": "Bearer naa-test-admin-key-123456789"}
 
 
 @pytest.fixture

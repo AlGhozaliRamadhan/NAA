@@ -1,5 +1,3 @@
 """
-Source Package for Cogito Inference Service
+Source Package for NAA (Notebooks AI API) Inference Service
 """
-
-__version__ = "0.9.1"

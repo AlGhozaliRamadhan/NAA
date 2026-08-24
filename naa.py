@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Cogito-0.9.1-15B CLI & Manager Entrypoint
+NAA (Notebooks AI API) - Universal OpenAI-Compatible REST API for Kaggle & Colab
 """
 
 import sys

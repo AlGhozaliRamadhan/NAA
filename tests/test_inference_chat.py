@@ -1,5 +1,5 @@
 """
-Tests for /v1/chat/completions endpoint (streaming and non-streaming inference).
+Tests for /v1/chat/completions endpoint (streaming and non-streaming inference) in NAA.
 """
 
 import json
@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 def test_chat_completions_non_streaming(client: TestClient, user_headers, mock_engine):
     payload = {
-        "model": "Cogito-0.9.1-15B",
+        "model": "NAA-AI-Model",
         "messages": [
             {"role": "user", "content": "What is 2+2?"}
         ],
@@ -19,7 +19,7 @@ def test_chat_completions_non_streaming(client: TestClient, user_headers, mock_e
     assert response.status_code == 200
     data = response.json()
     assert data["object"] == "chat.completion"
-    assert data["model"] == "Cogito-0.9.1-15B"
+    assert data["model"] == "NAA-AI-Model"
     assert len(data["choices"]) == 1
     assert data["choices"][0]["message"]["role"] == "assistant"
     assert "<think>\n" in data["choices"][0]["message"]["content"]
@@ -30,7 +30,7 @@ def test_chat_completions_non_streaming(client: TestClient, user_headers, mock_e
 
 def test_chat_completions_streaming(client: TestClient, user_headers, mock_engine):
     payload = {
-        "model": "Cogito-0.9.1-15B",
+        "model": "NAA-AI-Model",
         "messages": [
             {"role": "user", "content": "Tell me a joke."}
         ],

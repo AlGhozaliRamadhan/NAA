@@ -1,5 +1,5 @@
 """
-Chat Completions Endpoint (/v1/chat/completions)
+Chat Completions Endpoint (/v1/chat/completions) for NAA
 """
 
 import time
@@ -15,7 +15,7 @@ from src.config import settings
 from src.server.schemas import ChatCompletionRequest
 from src.server.auth import get_api_key
 
-logger = logging.getLogger("cogito-chat")
+logger = logging.getLogger("naa-chat")
 router = APIRouter(prefix="/v1", tags=["Chat"])
 
 def ensure_engine_ready(engine):
@@ -38,6 +38,7 @@ async def chat_completions(
     custom_stops = [body.stop] if isinstance(body.stop, str) else (body.stop or [])
     request_id = f"chatcmpl-{uuid.uuid4().hex}"
     created_ts = int(time.time())
+    model_name = body.model if body.model and body.model != "NAA-AI-Model" else getattr(engine, "model_name", settings.model_name)
 
     # Streaming Execution
     if body.stream:
@@ -48,7 +49,7 @@ async def chat_completions(
             last_heartbeat = time.time()
 
             # Initial role announcement chunk
-            yield f"data: {json.dumps({'id': request_id, 'object': 'chat.completion.chunk', 'created': created_ts, 'model': body.model, 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': ''}, 'finish_reason': None}]})}\n\n"
+            yield f"data: {json.dumps({'id': request_id, 'object': 'chat.completion.chunk', 'created': created_ts, 'model': model_name, 'choices': [{'index': 0, 'delta': {'role': 'assistant', 'content': ''}, 'finish_reason': None}]})}\n\n"
 
             try:
                 stream_iter = engine.generate_chat_stream(
@@ -87,7 +88,7 @@ async def chat_completions(
                             "id": request_id,
                             "object": "chat.completion.chunk",
                             "created": created_ts,
-                            "model": body.model,
+                            "model": model_name,
                             "choices": [{
                                 "index": 0,
                                 "delta": delta,
@@ -134,7 +135,7 @@ async def chat_completions(
         "id": request_id,
         "object": "chat.completion",
         "created": created_ts,
-        "model": body.model,
+        "model": model_name,
         "choices": [{
             "index": 0,
             "message": message,

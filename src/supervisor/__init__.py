@@ -1,1 +1,3 @@
-"""Cogito Supervisor Package"""
+"""
+NAA Supervisor Package
+"""

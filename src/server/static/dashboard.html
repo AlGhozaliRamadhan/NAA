@@ -2,34 +2,35 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Cogito-0.9.1-15B API Dashboard</title>
+<title>NAA - Notebooks AI API Dashboard</title>
 <style>
-:root{--bg:#0a0a0f;--card:#12121a;--border:#2a2a3e;--text:#e2e8f0;--muted:#7c85a2;--accent:#6c63ff;--success:#00e5a0;--warn:#ffb347}
+:root{--bg:#0a0a0f;--card:#12121a;--border:#2a2a3e;--text:#e2e8f0;--muted:#7c85a2;--accent:#6366f1;--success:#10b981;--warn:#f59e0b}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif;line-height:1.6;padding:24px}
 .container{max-width:900px;margin:0 auto}
 header{display:flex;justify-content:space-between;align-items:center;margin-bottom:32px;padding-bottom:16px;border-bottom:1px solid var(--border)}
 h1{font-size:24px;font-weight:700}
 .badge{padding:4px 12px;border-radius:999px;font-size:12px;font-weight:600}
-.badge.online{background:rgba(0,229,160,.15);color:var(--success);border:1px solid var(--success)}
-.badge.loading{background:rgba(255,179,71,.15);color:var(--warn);border:1px solid var(--warn)}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:16px;margin-bottom:24px}
+.badge.online{background:rgba(16,185,129,.15);color:var(--success);border:1px solid var(--success)}
+.badge.loading{background:rgba(245,158,11,.15);color:var(--warn);border:1px solid var(--warn)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px;margin-bottom:24px}
 .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px}
 .card-title{font-size:12px;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
-.card-value{font-size:22px;font-weight:700}
+.card-value{font-size:20px;font-weight:700;word-break:break-word}
 pre{background:#161622;border:1px solid var(--border);border-radius:8px;padding:16px;overflow-x:auto;font-family:monospace;font-size:13px;margin-top:12px}
 ul{margin-left:20px;margin-top:8px}
-li{margin-bottom:4px}
+li{margin-bottom:6px}
 a{color:var(--accent);text-decoration:none}
 a:hover{text-decoration:underline}
+code{background:#1e1e2d;padding:2px 6px;border-radius:4px;font-size:13px}
 </style>
 </head>
 <body>
 <div class="container">
   <header>
     <div>
-      <h1>Cogito-0.9.1-15B API</h1>
-      <p style="color:var(--muted);font-size:13px">OpenAI-Compatible Inference Service</p>
+      <h1>NAA - Notebooks AI API</h1>
+      <p style="color:var(--muted);font-size:13px">Universal OpenAI-Compatible LLM Inference Engine for Kaggle & Colab</p>
     </div>
     <div id="statusBadge" class="badge loading">Checking...</div>
   </header>
@@ -40,7 +41,11 @@ a:hover{text-decoration:underline}
     </div>
     <div class="card">
       <div class="card-title">Active Model</div>
-      <div id="modelName" class="card-value">Cogito-0.9.1-15B</div>
+      <div id="modelName" class="card-value">-</div>
+    </div>
+    <div class="card">
+      <div class="card-title">Hardware / GPU</div>
+      <div id="gpuInfo" class="card-value">-</div>
     </div>
     <div class="card">
       <div class="card-title">Server Uptime</div>
@@ -48,12 +53,12 @@ a:hover{text-decoration:underline}
     </div>
   </div>
   <div class="card" style="margin-bottom:24px">
-    <div class="card-title">Quick Endpoints</div>
+    <div class="card-title">API Endpoints</div>
     <ul>
-      <li><code>GET /health</code> - Health and loading status</li>
+      <li><code>GET /health</code> - Health and model loading status</li>
       <li><code>GET /v1/models</code> - List models</li>
-      <li><code>POST /v1/chat/completions</code> - OpenAI Chat Completions (SSE Streaming supported)</li>
-      <li><code>POST /v1/completions</code> - Text Completions</li>
+      <li><code>POST /v1/chat/completions</code> - OpenAI Chat Completions (SSE Streaming & Uncensored/Abliterated Presets supported)</li>
+      <li><code>POST /v1/completions</code> - OpenAI Raw Text Completions</li>
       <li><code>GET /docs</code> - <a href="/docs">Interactive Swagger Documentation</a></li>
     </ul>
   </div>
@@ -71,12 +76,13 @@ async function checkHealth(){
       b.className='badge loading'; b.innerText='LOADING MODEL';
       s.innerText='Loading...'; s.style.color='var(--warn)';
     } else {
-      b.className='badge loading'; b.innerText='STARTING';
-      s.innerText='Initializing';
+      b.className='badge loading'; b.innerText='INITIALIZING';
+      s.innerText='Starting';
     }
     let u=Math.floor(d.uptime||0), h=Math.floor(u/3600), m=Math.floor((u%3600)/60), sec=u%60;
     document.getElementById('uptime').innerText = `${h}h ${m}m ${sec}s`;
-    document.getElementById('modelName').innerText = d.model || 'Cogito-0.9.1-15B';
+    document.getElementById('modelName').innerText = d.model || 'Universal LLM';
+    document.getElementById('gpuInfo').innerText = d.gpu ? `${d.gpu} (${d.environment})` : d.environment;
   }catch(e){}
 }
 checkHealth(); setInterval(checkHealth, 5000);

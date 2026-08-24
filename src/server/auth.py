@@ -1,5 +1,5 @@
 """
-Authentication & Authorization Dependencies
+Authentication & Authorization Dependencies for NAA
 """
 
 from typing import Optional, Dict, Any

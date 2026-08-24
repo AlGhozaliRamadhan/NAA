@@ -1,5 +1,5 @@
 """
-High-Performance Stopping Criteria for Text Generation
+High-Performance Stopping Criteria for Text Generation in NAA
 """
 
 from typing import List, Any, Optional
@@ -7,7 +7,7 @@ from src.core.prompt import DEFAULT_STOP_TOKENS
 
 def get_combined_stop_tokens(custom_stops: Optional[List[str]] = None) -> List[str]:
     """
-    Returns the consolidated list of stop tokens passed directly to llama.cpp's native C++ stop engine.
+    Returns the consolidated list of stop tokens passed directly to llama.cpp or transformers engine.
     """
     stops = list(DEFAULT_STOP_TOKENS)
     if custom_stops:
@@ -18,7 +18,7 @@ def get_combined_stop_tokens(custom_stops: Optional[List[str]] = None) -> List[s
 
 class WindowedStringStopCriteria:
     """
-    Windowed stopping criteria for fallback/legacy tokenizers.
+    Windowed stopping criteria for fallback/transformers tokenizers.
     Inspects trailing window of generated tokens.
     """
     def __init__(self, tok_inst: Any, stop_words: List[str], input_length: int, max_window_tokens: int = 16):

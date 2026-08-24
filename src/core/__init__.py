@@ -1,1 +1,3 @@
-"""Cogito Core Module"""
+"""
+NAA Core Module
+"""

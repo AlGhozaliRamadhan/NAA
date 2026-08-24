@@ -1,15 +1,16 @@
 """
-OpenAI-Compatible Pydantic Request & Response Schemas
+OpenAI-Compatible Pydantic Request & Response Schemas for NAA
 """
 
 from typing import Optional, List, Union, Dict, Any
 from pydantic import BaseModel, Field
 from src.core.prompt import ChatMessage
+from src.config import settings
 
 class ChatCompletionRequest(BaseModel):
-    model: str = "Cogito-0.9.1-15B"
+    model: str = Field(default="NAA-AI-Model")
     messages: List[ChatMessage]
-    max_tokens: Optional[int] = Field(default=2048, ge=1, le=32768)
+    max_tokens: Optional[int] = Field(default=2048, ge=1, le=65536)
     temperature: Optional[float] = Field(default=0.70, ge=0.0, le=2.0)
     top_p: Optional[float] = Field(default=0.90, ge=0.0, le=1.0)
     min_p: Optional[float] = Field(default=0.05, ge=0.0, le=1.0)
@@ -20,9 +21,9 @@ class ChatCompletionRequest(BaseModel):
     n: Optional[int] = Field(default=1, ge=1, le=1)
 
 class CompletionRequest(BaseModel):
-    model: str = "Cogito-0.9.1-15B"
+    model: str = Field(default="NAA-AI-Model")
     prompt: str
-    max_tokens: Optional[int] = Field(default=2048, ge=1, le=32768)
+    max_tokens: Optional[int] = Field(default=2048, ge=1, le=65536)
     temperature: Optional[float] = Field(default=0.70, ge=0.0, le=2.0)
     top_p: Optional[float] = Field(default=0.90, ge=0.0, le=1.0)
     min_p: Optional[float] = Field(default=0.05, ge=0.0, le=1.0)
@@ -40,5 +41,5 @@ class RevokeKeyRequest(BaseModel):
     key: str
 
 class EmbeddingRequest(BaseModel):
-    model: str = "Cogito-0.9.1-15B"
+    model: str = Field(default="NAA-AI-Model")
     input: Union[str, List[str]]

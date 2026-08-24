@@ -1,1 +1,3 @@
-"""Cogito Server Package"""
+"""
+NAA Server Package
+"""

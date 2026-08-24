@@ -1,5 +1,5 @@
 """
-Tests for Admin endpoints: key creation, listing, revoking, deletion, and usage stats.
+Tests for Admin endpoints: key creation, listing, revoking, deletion, and usage stats in NAA.
 """
 
 from fastapi.testclient import TestClient
@@ -13,7 +13,7 @@ def test_admin_create_key(client: TestClient, admin_headers):
     assert "key" in data
     assert data["key"]["name"] == "app-backend"
     assert data["key"]["rate_limit_rpm"] == 45
-    assert data["key"]["key"].startswith("cg-")
+    assert data["key"]["key"].startswith("naa-")
 
 def test_admin_list_keys(client: TestClient, admin_headers):
     # Create key

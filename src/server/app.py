@@ -1,5 +1,5 @@
 """
-FastAPI Application Factory & Lifecycle
+FastAPI Application Factory & Lifecycle for NAA (Notebooks AI API)
 """
 
 import logging
@@ -24,7 +24,7 @@ from src.server.routes.chat import router as chat_router
 from src.server.routes.completions import router as completions_router
 from src.server.routes.admin import router as admin_router
 
-logger = logging.getLogger("cogito-app")
+logger = logging.getLogger("naa-app")
 
 def create_app(
     engine: InferenceEngine = None,
@@ -34,7 +34,10 @@ def create_app(
     if engine is None:
         engine = InferenceEngine(
             model_path=settings.model_path,
+            model_name=settings.model_name,
             quant_mode=settings.quant_mode,
+            preset=settings.preset,
+            system_prompt=settings.system_prompt,
             trust_remote_code=settings.trust_remote_code
         )
 
@@ -49,13 +52,13 @@ def create_app(
         if auto_load_model and Path(settings.model_path).exists():
             threading.Thread(target=engine.load, daemon=True).start()
         else:
-            logger.warning(f"Model path {settings.model_path} does not exist. Awaiting download.")
+            logger.warning(f"Model path {settings.model_path} does not exist. Awaiting download or configuration.")
         yield
 
     app = FastAPI(
-        title="Cogito-0.9.1-15B API",
-        description="Production OpenAI-Compatible REST API for Cogito-0.9.1-15B Safetensors model",
-        version="1.0.0",
+        title="NAA (Notebooks AI API)",
+        description="Production OpenAI-Compatible Universal REST API for Kaggle, Google Colab & Local Systems",
+        version="2.0.0",
         docs_url="/docs",
         redoc_url="/redoc",
         lifespan=lifespan,
@@ -125,7 +128,7 @@ def create_app(
 
 def run():
     app = create_app()
-    logger.info(f"Starting Cogito API Server on port {settings.port}")
+    logger.info(f"Starting NAA API Server on port {settings.port}")
     logger.info(f"Admin Key: {settings.admin_key[:8]}...{settings.admin_key[-4:]}")
     logger.info(f"Model Path: {settings.model_path}")
     uvicorn.run(app, host="0.0.0.0", port=settings.port, log_level="info")

@@ -37,25 +37,100 @@ from src.supervisor.watchdog import (
 _server_proc: Optional[subprocess.Popen] = None
 _tunnel_proc: Optional[subprocess.Popen] = None
 
+RESET = "\033[0m"
+GREEN = "\033[32m"
+RED = "\033[31m"
+YELLOW = "\033[33m"
+CYAN = "\033[36m"
+BOLD = "\033[1m"
+
 def _get_attr(name: str, fallback: Any) -> Any:
     mod = sys.modules.get("naa")
     if mod and hasattr(mod, name):
         return getattr(mod, name)
     return getattr(sys.modules.get(__name__), name, fallback)
 
-def header(title: str):      print(f"\n--- {title.upper()} ---")
-def info(msg: str):         print(f"[INFO] {msg}")
-def ok(msg: str):           print(f"[OK]   {msg}")
-def warn(msg: str):         print(f"[WARN] {msg}")
-def err(msg: str):          print(f"[ERR]  {msg}")
-def step(n: int, msg: str):   print(f"\n[{n}] {msg}")
-def rule():                 print("-" * 60)
+def header(title: str):      print(f"{RESET}\n--- {title.upper()} ---")
+def info(msg: str):         print(f"{RESET}[INFO] {msg}")
+def ok(msg: str):           print(f"{RESET}{GREEN}[OK]{RESET}   {msg}")
+def warn(msg: str):         print(f"{RESET}{YELLOW}[WARN]{RESET} {msg}")
+def err(msg: str):          print(f"{RESET}{RED}[ERR]{RESET}  {msg}")
+def step(n: int, msg: str):   print(f"{RESET}\n[{n}] {msg}")
+def rule():                 print(f"{RESET}" + "-" * 60)
+
+try:
+    from tqdm.auto import tqdm as _tqdm_base
+except ImportError:
+    from tqdm import tqdm as _tqdm_base
+
+class NotebookProgressBar(_tqdm_base):
+    """
+    Clean single-line progress bar for Jupyter, Colab, Kaggle, and terminals.
+    Dynamically shifts color based on download progress (Red -> Yellow -> Cyan -> Green)
+    and overwrites a single line using carriage returns without multi-line spam.
+    """
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("mininterval", 0.2)
+        kwargs.setdefault("file", sys.stdout)
+        super().__init__(*args, **kwargs)
+        self._closed_flushed = False
+
+    def display(self, msg=None, pos=None):
+        if self.total and self.total > 0:
+            pct = (self.n / self.total) * 100
+            cur_gb = self.n / (1024 ** 3)
+            tot_gb = self.total / (1024 ** 3)
+            rate = self.format_dict.get("rate") or 0
+            speed_mb = rate / (1024 ** 2)
+            remaining = (self.total - self.n) / rate if rate > 0 else 0
+
+            # Dynamic color transition based on percentage:
+            if pct < 25:
+                col = "\033[31m"  # Red
+            elif pct < 60:
+                col = "\033[33m"  # Yellow
+            elif pct < 90:
+                col = "\033[36m"  # Cyan
+            else:
+                col = "\033[32m"  # Green
+
+            desc = (self.desc or "Downloading").split(":")[-1].strip()
+            if len(desc) > 32:
+                desc = "..." + desc[-29:]
+
+            bar_len = 24
+            filled = int(bar_len * (self.n / self.total))
+            bar = "=" * filled + (">" if filled < bar_len else "=") + " " * max(0, bar_len - filled - 1)
+            if filled >= bar_len:
+                bar = "=" * bar_len
+
+            mins, secs = divmod(int(remaining), 60)
+            eta_str = f"{mins:02d}:{secs:02d}"
+
+            line = f"\r\033[0m{col}[{bar}] {pct:5.1f}%\033[0m | {desc} | {cur_gb:.2f}/{tot_gb:.2f} GB | {speed_mb:.1f} MB/s | ETA: {eta_str}\033[K"
+            try:
+                self.fp.write(line)
+                self.fp.flush()
+            except Exception:
+                pass
+        else:
+            super().display(msg=msg, pos=pos)
+
+    def close(self):
+        super().close()
+        if not self._closed_flushed:
+            try:
+                self.fp.write("\033[0m\n")
+                self.fp.flush()
+            except Exception:
+                pass
+            self._closed_flushed = True
 
 def print_banner(model_name: Optional[str] = None):
     active_model = model_name or MODEL_NAME
     gpu_info = f"GPU ({ENV['gpu_count']}x {ENV['gpu_name']})" if ENV['is_gpu'] else "CPU"
     env_label = f"{ENV['name'].upper()} - {gpu_info}"
-    print("\n============================================================")
+    print(f"{RESET}\n============================================================")
     print(f" NAA - Notebooks AI API")
     print(f" Target Model: {active_model}")
     print(f" Environment:  {env_label}")
@@ -239,6 +314,7 @@ def download_model(model_cfg: Dict[str, str]) -> Path:
                 "filename": filename,
                 "local_dir": str(MODEL_DIR),
                 "local_dir_use_symlinks": False,
+                "tqdm_class": NotebookProgressBar,
             }
             hf_token = os.environ.get("HF_TOKEN")
             if hf_token:
@@ -264,6 +340,7 @@ def download_model(model_cfg: Dict[str, str]) -> Path:
             "repo_id": repo_id,
             "local_dir": str(dest_dir),
             "local_dir_use_symlinks": False,
+            "tqdm_class": NotebookProgressBar,
         }
         hf_token = os.environ.get("HF_TOKEN")
         if hf_token:

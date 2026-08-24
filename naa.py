@@ -63,4 +63,6 @@ _server_proc = None
 _tunnel_proc = None
 
 if __name__ == "__main__":
+    sys.stdout.write("\033[0m")
+    sys.stdout.flush()
     main()

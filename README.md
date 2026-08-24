@@ -42,6 +42,8 @@ else:
     !git pull origin main
     !git stash drop
 
+print("\033[0m", end="")
+
 # 3. Install dependencies and launch NAA server
 !pip install -q -r requirements.txt
 !python naa.py start
@@ -74,6 +76,8 @@ else:
     !git stash
     !git pull origin main
     !git stash drop
+
+print("\033[0m", end="")
 
 # 3. Install dependencies and launch NAA server
 !pip install -q -r requirements.txt

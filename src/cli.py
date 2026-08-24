@@ -580,11 +580,98 @@ def cmd_start(args: list = None):
 
     step(2, "Waiting for model to load into memory/VRAM...")
     start_wait = time.time()
+    spinners = ["|", "/", "-", "\\"]
+    spin_idx = 0
+    loaded_ok = False
+
     while time.time() - start_wait < 600:
+        elapsed = time.time() - start_wait
+        spin = spinners[spin_idx % len(spinners)]
+        spin_idx += 1
+
+        # Check if server process exited unexpectedly
+        current_server_proc = _get_attr("_server_proc", _server_proc)
+        if current_server_proc is not None and hasattr(current_server_proc, "poll") and current_server_proc.poll() is not None:
+            sys.stdout.write("\033[0m\n")
+            sys.stdout.flush()
+            err(f"Server process exited unexpectedly (code {current_server_proc.returncode}).")
+            if Path(SERVER_LOG).exists():
+                log_tail = Path(SERVER_LOG).read_text(encoding="utf-8", errors="replace").strip().splitlines()[-20:]
+                if log_tail:
+                    print("\n--- LAST SERVER LOG OUTPUT ---")
+                    for l in log_tail:
+                        print(f"  {l}")
+                    print("------------------------------\n")
+            return
+
+        # Check health using is_server_healthy_fn
         if is_server_healthy_fn(PORT):
-            ok("Model loaded and ready for inference!")
+            loaded_ok = True
+            vram_info = ""
+            try:
+                import torch
+                if torch.cuda.is_available():
+                    free_b, total_b = torch.cuda.mem_get_info()
+                    used_gb = (total_b - free_b) / (1024 ** 3)
+                    vram_info = f" ({used_gb:.2f} GB VRAM allocated in {int(elapsed)}s)"
+            except Exception:
+                pass
+            if not vram_info:
+                vram_info = f" (in {int(elapsed)}s)"
+
+            sys.stdout.write(f"\r\033[0m\033[32m[OK]   Model loaded and ready for inference!{vram_info}\033[K\n")
+            sys.stdout.flush()
             break
-        time.sleep(3)
+
+        # Query /health for detailed live VRAM stats if available
+        health_data = None
+        try:
+            req = urllib.request.Request(f"http://localhost:{PORT}/health")
+            with urllib.request.urlopen(req, timeout=1.0) as r:
+                if r.status == 200:
+                    health_data = json.loads(r.read())
+        except Exception:
+            pass
+
+        if health_data:
+            if health_data.get("load_error"):
+                sys.stdout.write("\033[0m\n")
+                sys.stdout.flush()
+                err(f"Model load failed: {health_data['load_error']}")
+                return
+
+            gpu_name = health_data.get("gpu", "CPU")
+            vram_used_mb = health_data.get("gpu_vram_used_mb", 0)
+            vram_total_mb = health_data.get("gpu_vram_total_mb", 0)
+
+            if vram_total_mb > 0:
+                pct = min(100.0, (vram_used_mb / vram_total_mb) * 100)
+                used_gb = vram_used_mb / 1024
+                tot_gb = vram_total_mb / 1024
+                col = "\033[33m" if pct < 50 else ("\033[36m" if pct < 85 else "\033[32m")
+                bar_len = 16
+                filled = int(bar_len * (pct / 100))
+                bar = "=" * filled + (">" if filled < bar_len else "=") + " " * max(0, bar_len - filled - 1)
+                if filled >= bar_len: bar = "=" * bar_len
+
+                line = f"\r\033[0m{col}[LOADING {spin}] [{bar}] {pct:5.1f}%\033[0m | VRAM: {used_gb:4.1f}/{tot_gb:4.1f} GB ({gpu_name}) | Model: {active_name} | Elapsed: {int(elapsed)}s\033[K"
+            else:
+                line = f"\r\033[0m\033[33m[LOADING {spin}]\033[0m Loading weights into system memory... | Model: {active_name} | Elapsed: {int(elapsed)}s\033[K"
+
+            sys.stdout.write(line)
+            sys.stdout.flush()
+        else:
+            line = f"\r\033[0m\033[33m[LOADING {spin}]\033[0m Initializing inference process... | Elapsed: {int(elapsed)}s\033[K"
+            sys.stdout.write(line)
+            sys.stdout.flush()
+
+        time.sleep(0.3)
+
+    if not loaded_ok:
+        sys.stdout.write("\033[0m\n")
+        sys.stdout.flush()
+        err("Model loading timed out after 600s.")
+        return
 
     step(3, "Starting Cloudflare Quick Tunnel...")
     public_url = None

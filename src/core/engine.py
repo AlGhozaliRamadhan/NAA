@@ -62,6 +62,8 @@ class InferenceEngine:
         self.tokenizer: Optional[Any] = None
         self.model_loaded: bool = False
         self.model_loading: bool = False
+        self.load_error: Optional[str] = None
+        self.load_stage: str = "idle"
         self.lock = threading.Lock()
         self.ready_event = threading.Event()
 
@@ -76,6 +78,8 @@ class InferenceEngine:
         if self.model_loaded or self.model_loading:
             return
         self.model_loading = True
+        self.load_error = None
+        self.load_stage = "loading"
         logger.info(f"Loading model '{self.model_name}' from: {self.model_path} (quant={self.quant_mode})")
 
         try:
@@ -151,9 +155,12 @@ class InferenceEngine:
                     logger.warning("torch / transformers not available; operating in mock/compatibility mode.")
 
             self.model_loaded = True
+            self.load_stage = "ready"
             self.ready_event.set()
             logger.info("Model successfully loaded and ready for inference!")
         except Exception as e:
+            self.load_error = str(e)
+            self.load_stage = "error"
             logger.error(f"Failed to load model: {e}", exc_info=True)
         finally:
             self.model_loading = False

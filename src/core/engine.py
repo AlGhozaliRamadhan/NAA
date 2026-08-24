@@ -39,11 +39,11 @@ class InferenceEngine:
         quant_mode: str = "auto",
         preset: str = "default",
         system_prompt: Optional[str] = None,
-        n_ctx: int = 32768,
+        n_ctx: int = 8192,
         n_gpu_layers: int = -1,
         flash_attn: bool = True,
-        cache_type_k: str = "q8_0",
-        cache_type_v: str = "q8_0",
+        cache_type_k: Optional[Union[int, str]] = None,
+        cache_type_v: Optional[Union[int, str]] = None,
         trust_remote_code: bool = True,
     ):
         self.model_path = Path(model_path)
@@ -51,9 +51,9 @@ class InferenceEngine:
         self.quant_mode = quant_mode
         self.preset = preset
         self.system_prompt = system_prompt
-        self.n_ctx = n_ctx
-        self.n_gpu_layers = n_gpu_layers
-        self.flash_attn = flash_attn
+        self.n_ctx = int(n_ctx) if n_ctx else 8192
+        self.n_gpu_layers = int(n_gpu_layers) if n_gpu_layers is not None else -1
+        self.flash_attn = bool(flash_attn)
         self.cache_type_k = cache_type_k
         self.cache_type_v = cache_type_v
         self.trust_remote_code = trust_remote_code
@@ -72,6 +72,19 @@ class InferenceEngine:
         if p.name and p.name not in (".", ""):
             return p.name.replace(".gguf", "")
         return "NAA-AI-Model"
+
+    def _map_ggml_type(self, val: Any) -> Optional[int]:
+        if val is None or isinstance(val, int):
+            return val
+        if isinstance(val, str) and LLAMA_CPP_AVAILABLE:
+            val_lower = val.lower().strip()
+            if hasattr(llama_cpp, "GGML_TYPE_Q8_0") and val_lower in ("q8_0", "8bit"):
+                return getattr(llama_cpp, "GGML_TYPE_Q8_0")
+            elif hasattr(llama_cpp, "GGML_TYPE_Q4_0") and val_lower in ("q4_0", "4bit"):
+                return getattr(llama_cpp, "GGML_TYPE_Q4_0")
+            elif hasattr(llama_cpp, "GGML_TYPE_F16") and val_lower in ("f16", "fp16", "16bit"):
+                return getattr(llama_cpp, "GGML_TYPE_F16")
+        return None
 
     def load(self):
         """Loads the model into GPU VRAM / system memory (Safetensors / GGUF)."""
@@ -99,16 +112,26 @@ class InferenceEngine:
                 model_file = self.model_path
                 if model_file.is_dir():
                     model_file = list(model_file.glob("*.gguf"))[0]
+
+                llama_kwargs: Dict[str, Any] = {
+                    "model_path": str(model_file),
+                    "n_ctx": self.n_ctx,
+                    "n_gpu_layers": self.n_gpu_layers,
+                    "verbose": False,
+                }
+                if self.flash_attn:
+                    llama_kwargs["flash_attn"] = True
+
+                type_k_val = self._map_ggml_type(self.cache_type_k)
+                if type_k_val is not None:
+                    llama_kwargs["type_k"] = type_k_val
+
+                type_v_val = self._map_ggml_type(self.cache_type_v)
+                if type_v_val is not None:
+                    llama_kwargs["type_v"] = type_v_val
+
                 logger.info(f"Initializing llama_cpp.Llama with GGUF weights: {model_file}")
-                self.model = llama_cpp.Llama(
-                    model_path=str(model_file),
-                    n_ctx=self.n_ctx,
-                    n_gpu_layers=self.n_gpu_layers,
-                    flash_attn=self.flash_attn,
-                    type_k=self.cache_type_k,
-                    type_v=self.cache_type_v,
-                    verbose=False,
-                )
+                self.model = llama_cpp.Llama(**llama_kwargs)
             else:
                 # Load Safetensors / Hugging Face model
                 try:

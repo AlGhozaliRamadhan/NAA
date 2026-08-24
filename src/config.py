@@ -161,7 +161,7 @@ class Settings:
         os.environ.get("PRESET", "default")
     ).lower()
     system_prompt: Optional[str] = os.environ.get("NAA_SYSTEM_PROMPT", os.environ.get("SYSTEM_PROMPT", None))
-    max_context: int = int(os.environ.get("NAA_CTX", os.environ.get("MAX_CONTEXT", "32768")))
+    max_context: int = int(os.environ.get("NAA_CTX", os.environ.get("MAX_CONTEXT", "8192")))
     default_tokens: int = int(os.environ.get("NAA_MAX_TOKENS", os.environ.get("MAX_TOKENS_DEFAULT", "2048")))
     default_temperature: float = float(os.environ.get("NAA_TEMPERATURE", "0.70"))
     default_top_p: float = float(os.environ.get("NAA_TOP_P", "0.90"))

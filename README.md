@@ -47,6 +47,14 @@ else:
 !python naa.py start
 ```
 
+For GGUF models on Kaggle GPU, install `llama-cpp-python` with prebuilt CUDA wheels:
+
+```python
+!pip install -q -r requirements.txt
+!pip install -q llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+!python naa.py start --model "https://huggingface.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED/blob/main/Qwen3.8-27B-OBLITERATED-Q4_K_M.gguf"
+```
+
 ### For Google Colab
 
 ```python
@@ -72,6 +80,14 @@ else:
 !python naa.py start
 ```
 
+For GGUF models on Google Colab GPU:
+
+```python
+!pip install -q -r requirements.txt
+!pip install -q llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
+!python naa.py start --model "https://huggingface.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED/blob/main/Qwen3.8-27B-OBLITERATED-Q4_K_M.gguf"
+```
+
 When the server initializes, the terminal displays:
 
 ```text
@@ -89,29 +105,55 @@ When the server initializes, the terminal displays:
 
 ## CLI Usage and Model Configuration
 
-NAA allows dynamic model specification via CLI arguments or environment variables:
+NAA supports flexible model resolution and runtime configuration via CLI flags, positional arguments, or environment variables.
+
+### CLI Flags
+
+| Flag | Short | Description | Example |
+|---|---|---|---|
+| `--model` | `-m` | Hugging Face repo ID, direct GGUF URL, repo:file, or quant profile | `--model Qwen/Qwen2.5-7B-Instruct` |
+| `--preset` | `-p` | Prompt preset (`default`, `uncensored`, `abliterated`) | `--preset uncensored` |
+| `--system-prompt` | `-s` | Global system prompt override | `--system-prompt "You are a specialized code reviewer."` |
+
+### Model Specification Formats
+
+NAA automatically parses and routes all common model source formats:
+
+1. **Direct Hugging Face GGUF URL**:
+   ```bash
+   python naa.py start --model "https://huggingface.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED/blob/main/Qwen3.8-27B-OBLITERATED-Q4_K_M.gguf"
+   ```
+
+2. **Standard Hugging Face Repository**:
+   ```bash
+   python naa.py start --model "Qwen/Qwen2.5-7B-Instruct"
+   ```
+
+3. **GGUF Repo with Colon Syntax (`repo_id:filename`)**:
+   ```bash
+   python naa.py start --model "bartowski/Llama-3.3-70B-Instruct-GGUF:Llama-3.3-70B-Instruct-Q4_K_M.gguf"
+   ```
+
+4. **Built-in Quantization Profiles**:
+   ```bash
+   python naa.py start --model 4bit
+   python naa.py start --model 8bit
+   python naa.py start --model 16bit
+   ```
+
+### Common Commands
 
 ```bash
-# Start server with default or auto-configured model
+# Start server with default auto-detected configuration
 python naa.py start
 
-# Load any Hugging Face repository directly
-python naa.py start --model Qwen/Qwen2.5-7B-Instruct
-
-# Load an uncensored model with unconstrained reasoning preset
+# Start server with an uncensored deliberation preset
 python naa.py start --model cognitivecomputations/dolphin-2.9.4-llama3.1-8b --preset uncensored
 
-# Load DeepSeek reasoning model (preserves <think> deliberation tags)
-python naa.py start --model deepseek-ai/DeepSeek-R1-Distill-Qwen-7B
+# Setup and download model weights before launching the server
+python naa.py setup --model Qwen/Qwen2.5-7B-Instruct
 
-# Setup and download model weights before starting
-python naa.py setup
-python naa.py setup 4bit
-python naa.py setup 8bit
-python naa.py setup 16bit
-python naa.py setup meta-llama/Llama-3.1-8B-Instruct
-
-# Manage API keys interactively
+# Manage API keys interactively (create, list, revoke)
 python naa.py keys
 
 # Check active server health, loaded model, and uptime
@@ -120,14 +162,14 @@ python naa.py status
 
 ---
 
-## Uncensored and Abliterated Model Support
+## Model Passthrough and Preset Modes
 
-Standard API servers often hinder uncensored or abliterated models by forcing synthetic alignment prompts, overriding user system messages, or mangling chat templates. NAA eliminates these restrictions:
+NAA is designed to avoid interfering with model outputs or imposing unwanted conversational behaviors:
 
-1. **Clean Passthrough (Default)**: By default, NAA injects no artificial guardrails or moralizing prompts. Incoming conversation history is formatted according to the model's native chat template.
-2. **Preservation of System Instructions**: Any system message provided by the caller is preserved verbatim.
-3. **Reasoning and Thinking Tag Passthrough**: Internal deliberation tags (such as `<think>...</think>`) are streamed and returned without alteration, ensuring full compatibility with reasoning architectures like DeepSeek-R1.
-4. **Uncensored Deliberation Preset (`--preset uncensored`)**: When enabled, NAA provides structured reasoning directives for uninhibited problem-solving:
+1. **Pure Passthrough (Default)**: By default, NAA injects no synthetic personas, forced system prompts, or moralizing guardrails. The model runs using its native weights and formatting template.
+2. **Preservation of System Instructions**: Any system message supplied by your client application or API request is forwarded verbatim to the inference engine.
+3. **Reasoning and Thinking Tag Passthrough**: Deliberation and scratchpad tags (such as `<think>...</think>`) stream through unchanged, maintaining full support for DeepSeek-R1 and similar reasoning models.
+4. **Optional Deliberation Preset (`--preset uncensored`)**: If explicitly enabled via `--preset uncensored`, NAA injects structured epistemic deliberation directives for analytical problem-solving:
 
 ```text
 <confidence>0.XX</confidence>

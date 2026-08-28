@@ -22,6 +22,12 @@ except ImportError:
 
 from src.core.stop_criteria import get_combined_stop_tokens
 from src.core.prompt import DEFAULT_STOP_TOKENS, CANONICAL_SYSTEM_PROMPT, ChatMessage, prepare_chat_messages
+from src.core.tool_calls import (
+    inject_tool_prompt,
+    messages_for_transformers,
+    tokenizer_supports_tools,
+    tools_for_transformers,
+)
 
 class InferenceEngine:
     """
@@ -191,6 +197,49 @@ class InferenceEngine:
     def is_ready(self) -> bool:
         return self.model_loaded and self.model is not None
 
+    def _render_transformers_chat_prompt(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Any = "auto",
+    ) -> str:
+        """Render the model's native tool template, with a portable fallback."""
+
+        template_messages = messages_for_transformers(messages)
+        supports_tools = bool(tools) and tokenizer_supports_tools(self.tokenizer)
+        if tools and not supports_tools:
+            template_messages = inject_tool_prompt(template_messages, tools, tool_choice)
+
+        if hasattr(self.tokenizer, "apply_chat_template"):
+            kwargs: Dict[str, Any] = {
+                "tokenize": False,
+                "add_generation_prompt": True,
+            }
+            template = getattr(self.tokenizer, "chat_template", None)
+            if supports_tools:
+                kwargs["tools"] = tools_for_transformers(tools)
+                kwargs["tool_choice"] = tool_choice
+                if isinstance(template, dict) and "tool_use" in template:
+                    kwargs["chat_template"] = "tool_use"
+            try:
+                return self.tokenizer.apply_chat_template(template_messages, **kwargs)
+            except (TypeError, ValueError) as exc:
+                if not tools:
+                    raise
+                logger.warning("Native tool chat template failed; using portable tool prompt: %s", exc)
+                fallback = inject_tool_prompt(messages_for_transformers(messages), tools, tool_choice)
+                return self.tokenizer.apply_chat_template(
+                    fallback,
+                    tokenize=False,
+                    add_generation_prompt=True,
+                )
+
+        from src.core.prompt import build_chatml_prompt
+
+        fallback = inject_tool_prompt(template_messages, tools, tool_choice) if tools else template_messages
+        chat_msgs = [ChatMessage(**message) for message in fallback]
+        return build_chatml_prompt(chat_msgs)
+
     async def generate_chat_stream(
         self,
         messages: List[Union[ChatMessage, Dict[str, str]]],
@@ -202,6 +251,8 @@ class InferenceEngine:
         repeat_penalty: float = 1.08,
         custom_stops: Optional[List[str]] = None,
         cancel_event: Optional[asyncio.Event] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Any = "auto",
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Non-blocking streaming chat completion generator with instant cancellation.
@@ -231,6 +282,9 @@ class InferenceEngine:
                         "stop": stop_list,
                         "stream": True,
                     }
+                    if tools:
+                        kwargs["tools"] = tools
+                        kwargs["tool_choice"] = tool_choice or "auto"
                     for chunk in self.model.create_chat_completion(**kwargs):
                         if stop_worker.is_set():
                             break
@@ -239,18 +293,13 @@ class InferenceEngine:
                     import torch
                     from transformers import TextIteratorStreamer
 
-                    if hasattr(self.tokenizer, "apply_chat_template"):
-                        prompt_text = self.tokenizer.apply_chat_template(
-                            formatted_messages,
-                            tokenize=False,
-                            add_generation_prompt=True,
-                        )
-                    else:
-                        from src.core.prompt import build_chatml_prompt
-                        chat_msgs = [ChatMessage(role=m.get("role", "user"), content=m.get("content", "")) for m in formatted_messages]
-                        prompt_text = build_chatml_prompt(chat_msgs)
+                    prompt_text = self._render_transformers_chat_prompt(
+                        formatted_messages,
+                        tools=tools,
+                        tool_choice=tool_choice,
+                    )
 
-                    inputs = self.tokenizer(prompt_text, return_tensors="pt")
+                    inputs = self.tokenizer(prompt_text, return_tensors="pt", add_special_tokens=False)
                     if hasattr(self.model, "device"):
                         inputs = inputs.to(self.model.device)
 
@@ -337,6 +386,8 @@ class InferenceEngine:
         top_k: int = 40,
         repeat_penalty: float = 1.08,
         custom_stops: Optional[List[str]] = None,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        tool_choice: Any = "auto",
     ) -> Dict[str, Any]:
         """
         Non-blocking execution of complete chat completion.
@@ -350,7 +401,7 @@ class InferenceEngine:
 
         def _run():
             if hasattr(self.model, "create_chat_completion"):
-                return self.model.create_chat_completion(
+                kwargs: Dict[str, Any] = dict(
                     messages=formatted_messages,
                     max_tokens=max_tokens,
                     temperature=max(temperature, 1e-4) if temperature > 0 else 1e-4,
@@ -361,20 +412,19 @@ class InferenceEngine:
                     stop=stop_list,
                     stream=False,
                 )
+                if tools:
+                    kwargs["tools"] = tools
+                    kwargs["tool_choice"] = tool_choice or "auto"
+                return self.model.create_chat_completion(**kwargs)
             elif self.tokenizer is not None and hasattr(self.model, "generate"):
                 import torch
-                if hasattr(self.tokenizer, "apply_chat_template"):
-                    prompt_text = self.tokenizer.apply_chat_template(
-                        formatted_messages,
-                        tokenize=False,
-                        add_generation_prompt=True,
-                    )
-                else:
-                    from src.core.prompt import build_chatml_prompt
-                    chat_msgs = [ChatMessage(role=m.get("role", "user"), content=m.get("content", "")) for m in formatted_messages]
-                    prompt_text = build_chatml_prompt(chat_msgs)
+                prompt_text = self._render_transformers_chat_prompt(
+                    formatted_messages,
+                    tools=tools,
+                    tool_choice=tool_choice,
+                )
 
-                inputs = self.tokenizer(prompt_text, return_tensors="pt")
+                inputs = self.tokenizer(prompt_text, return_tensors="pt", add_special_tokens=False)
                 if hasattr(self.model, "device"):
                     inputs = inputs.to(self.model.device)
 

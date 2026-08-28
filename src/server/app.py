@@ -21,6 +21,7 @@ from src.core.key_manager import APIKeyManager
 from src.server.routes.health import router as health_router
 from src.server.routes.models import router as models_router
 from src.server.routes.chat import router as chat_router
+from src.server.routes.anthropic import router as anthropic_router
 from src.server.routes.completions import router as completions_router
 from src.server.routes.admin import router as admin_router
 
@@ -60,8 +61,8 @@ def create_app(
 
     app = FastAPI(
         title="NAA (Notebooks AI API)",
-        description="Production OpenAI-Compatible Universal REST API for Kaggle, Google Colab & Local Systems",
-        version="2.0.0",
+        description="Production OpenAI/Anthropic-compatible Universal REST API for agentic local models",
+        version="2.1.0",
         docs_url="/docs",
         redoc_url="/redoc",
         lifespan=lifespan,
@@ -124,6 +125,7 @@ def create_app(
     app.include_router(health_router)
     app.include_router(models_router)
     app.include_router(chat_router)
+    app.include_router(anthropic_router)
     app.include_router(completions_router)
     app.include_router(admin_router)
 

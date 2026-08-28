@@ -2,6 +2,7 @@
 Prompt Templates, Chat Formatter, and Uncensored/Abliterated Directives for NAA
 """
 
+import json
 from typing import List, Dict, Optional, Any, Union
 from pydantic import BaseModel
 
@@ -36,8 +37,13 @@ DEFAULT_STOP_TOKENS: List[str] = [
 ]
 
 class ChatMessage(BaseModel):
+    """OpenAI chat message, including the fields used by agent tool loops."""
+
     role: str
-    content: str
+    content: Any = None
+    name: Optional[str] = None
+    tool_call_id: Optional[str] = None
+    tool_calls: Optional[List[Dict[str, Any]]] = None
 
 def build_chatml_prompt(messages: List[ChatMessage], default_system: Optional[str] = None) -> str:
     """
@@ -50,10 +56,16 @@ def build_chatml_prompt(messages: List[ChatMessage], default_system: Optional[st
 
     for msg in messages:
         role = msg.role.lower()
-        if role in ("system", "user", "assistant"):
-            prompt += f"<|im_start|>{role}\n{msg.content}<|im_end|>\n"
-        else:
-            prompt += f"<|im_start|>{role}\n{msg.content}<|im_end|>\n"
+        content = msg.content or ""
+        if role == "assistant" and msg.tool_calls:
+            calls = "".join(
+                f"<tool_call>\n{json.dumps(call.get('function', {}), ensure_ascii=False)}\n</tool_call>"
+                for call in msg.tool_calls
+            )
+            content = f"{content}{calls}"
+        elif role == "tool":
+            content = f"<tool_result>\n{content}\n</tool_result>"
+        prompt += f"<|im_start|>{role}\n{content}<|im_end|>\n"
 
     prompt += "<|im_start|>assistant\n"
     return prompt
@@ -62,7 +74,7 @@ def prepare_chat_messages(
     messages: List[Union[ChatMessage, Dict[str, str]]],
     preset: str = "default",
     custom_system_prompt: Optional[str] = None
-) -> List[Dict[str, str]]:
+) -> List[Dict[str, Any]]:
     """
     Prepares a list of message dicts for inference, handling presets and custom system prompts.
     - If messages already have a 'system' message, it is preserved verbatim.
@@ -71,12 +83,15 @@ def prepare_chat_messages(
       * custom_system_prompt: prepends custom_system_prompt.
       * 'default' / 'raw': passes through messages cleanly without forced injection.
     """
-    raw_list: List[Dict[str, str]] = []
+    raw_list: List[Dict[str, Any]] = []
     for msg in messages:
         if isinstance(msg, ChatMessage):
-            raw_list.append({"role": msg.role, "content": msg.content})
+            raw_list.append(msg.model_dump(exclude_none=True))
         elif isinstance(msg, dict):
-            raw_list.append({"role": msg.get("role", "user"), "content": msg.get("content", "")})
+            normalized = dict(msg)
+            normalized.setdefault("role", "user")
+            normalized.setdefault("content", None)
+            raw_list.append(normalized)
 
     has_system = any(m.get("role") == "system" for m in raw_list)
     if has_system:

@@ -45,9 +45,10 @@ def test_models_list_endpoint(client: TestClient, user_headers):
     assert response.status_code == 200
     data = response.json()
     assert data["object"] == "list"
-    assert len(data["data"]) == 1
+    assert len(data["data"]) == 2
     assert data["data"][0]["id"] == "NAA-AI-Model"
     assert data["data"][0]["owned_by"] == "naa"
+    assert data["data"][1]["id"] == "claude-naa"
 
 def test_embeddings_stub_endpoint(client: TestClient, user_headers):
     response = client.post("/v1/embeddings", headers=user_headers, json={

@@ -14,7 +14,8 @@ NAA turns any Jupyter, Kaggle, or Google Colab notebook into a private, high-per
 - **Zero-Configuration Cloudflare Tunnel**: Automatic binary download and HTTPS public URL generation with no account, token, or port forwarding required.
 - **Supervisor Watchdog and Keepalive**: Background heartbeat loop prevents notebook kernel idle timeouts and automatically recovers the server process in the event of memory pressure or crashes.
 - **API Key and Sliding-Window Rate Limiting**: In-memory sliding-window request throttling (RPM), multi-user key generation, and administrative usage analytics.
-- **OpenAI Wire Compatibility**: Drop-in compatible with the OpenAI Python SDK, LangChain, LiteLLM, OpenWebUI, LibreChat, and cURL.
+- **Agentic Tool Calling**: Passes function schemas into native GGUF/Transformers chat templates, returns structured OpenAI `tool_calls`, translates common Qwen/Hermes/XML call syntax, and recovers once from short "I'll check" turns that forgot to make the call.
+- **OpenAI and Anthropic Wire Compatibility**: Supports OpenAI Chat Completions for OpenCode-style clients and Anthropic Messages SSE for Claude Code-style clients, in addition to the OpenAI Python SDK, LangChain, OpenWebUI, LibreChat, and cURL.
 
 ---
 
@@ -261,6 +262,64 @@ print(response.content)
 
 ---
 
+## Coding Agent Setup
+
+NAA exposes both tool-capable OpenAI Chat Completions and an Anthropic Messages compatibility endpoint. The client, not NAA, executes filesystem, shell, and editor tools; NAA returns a structured request and the client sends the result back for the next model turn.
+
+Use a model trained for tool calling. The bridge can translate a correct native call into the client protocol, but it cannot make a base or weakly trained model reliably choose appropriate tools. Coder/instruct variants with an embedded tool-aware chat template work best.
+
+Coding agents send large system prompts and tool schemas. The default context is 8,192 tokens; set `NAA_CTX=32768` (or another value supported by the model and available KV-cache memory) before `naa.py start` for longer agent sessions, then make the client `limit.context` match it.
+
+### OpenCode
+
+Create `opencode.json` in the project using NAA's `/v1` base URL. Replace the model key with the active ID returned by `GET /v1/models` if it differs:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "naa/NAA-AI-Model",
+  "provider": {
+    "naa": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "NAA",
+      "options": {
+        "baseURL": "https://YOUR-URL.trycloudflare.com/v1",
+        "apiKey": "{env:NAA_API_KEY}"
+      },
+      "models": {
+        "NAA-AI-Model": {
+          "name": "NAA Local Model",
+          "limit": {
+            "context": 8192,
+            "output": 4096
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+```powershell
+$env:NAA_API_KEY = "naa-YOUR_KEY"
+opencode
+```
+
+### Claude Code
+
+Claude Code uses the Anthropic Messages API, so its base URL must be the server root without `/v1`. NAA publishes the stable `claude-naa` alias for optional gateway model discovery:
+
+```powershell
+$env:ANTHROPIC_BASE_URL = "https://YOUR-URL.trycloudflare.com"
+$env:ANTHROPIC_AUTH_TOKEN = "naa-YOUR_KEY"
+$env:CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1"
+claude --model claude-naa
+```
+
+NAA implements `/v1/messages`, streaming text/tool events, `/v1/messages/count_tokens`, the startup `HEAD /api/hello` probe, both bearer and `x-api-key` authentication, tool results, and the model-discovery alias. Anthropic documents gateway use with the Anthropic Messages format but does not officially support routing Claude Code to non-Claude model weights, so this integration is protocol-compatible rather than vendor-supported.
+
+---
+
 ## Admin API and Key Management
 
 All administrative routes require the admin key header: `Authorization: Bearer YOUR_ADMIN_KEY`.
@@ -314,7 +373,10 @@ curl "https://YOUR-URL.trycloudflare.com/v1/admin/stats" \
 | `GET` | `/health` | None | Server health, active model, and GPU status |
 | `GET` | `/ping` | None | Liveness probe endpoint |
 | `GET` | `/v1/models` | API Key | List active and available models |
-| `POST` | `/v1/chat/completions` | API Key | OpenAI Chat Completion (supports SSE streaming) |
+| `POST` | `/v1/chat/completions` | API Key | OpenAI Chat Completion with tools and SSE streaming |
+| `POST` | `/v1/messages` | API Key | Anthropic Messages compatibility with tool-use SSE |
+| `POST` | `/v1/messages/count_tokens` | API Key | Approximate Anthropic input token count |
+| `HEAD` | `/api/hello` | None | Claude Code connection-warming probe |
 | `POST` | `/v1/completions` | API Key | OpenAI Text Completion (supports SSE streaming) |
 | `POST` | `/v1/admin/keys/create` | Admin Key | Create a new API key with RPM limit |
 | `GET` | `/v1/admin/keys/list` | Admin Key | List all active and revoked API keys |
@@ -350,6 +412,7 @@ curl "https://YOUR-URL.trycloudflare.com/v1/admin/stats" \
 | `NAA_QUANT` | `auto` | Quantization profile (`auto`, `4bit`, `8bit`, `16bit`, `q4_k_m`) |
 | `NAA_PRESET` | `default` | Prompt preset (`default`, `uncensored`, `abliterated`) |
 | `NAA_SYSTEM_PROMPT` | `None` | Global fallback system prompt |
+| `NAA_CTX` | `8192` | Loaded context window; agent clients often benefit from `32768` or more when hardware permits |
 | `NAA_PORT` / `PORT` | `8000` | Local port for FastAPI server |
 | `NAA_RPM` | `30` | Default rate limit in requests per minute per key |
 | `NAA_SSE_HEARTBEAT` | `5.0` | Interval in seconds for SSE streaming keepalive comments |

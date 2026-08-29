@@ -22,6 +22,7 @@ except ImportError:
 
 from src.core.stop_criteria import get_combined_stop_tokens
 from src.core.prompt import DEFAULT_STOP_TOKENS, CANONICAL_SYSTEM_PROMPT, ChatMessage, prepare_chat_messages
+from src.core.llama_server import LlamaServerBackend
 from src.core.tool_calls import (
     inject_tool_prompt,
     messages_for_transformers,
@@ -109,35 +110,55 @@ class InferenceEngine:
             )
 
             if is_gguf:
-                if not LLAMA_CPP_AVAILABLE:
-                    raise RuntimeError(
-                        "Model is in GGUF format, but 'llama-cpp-python' is not installed in the environment. "
-                        "To use GGUF models on Kaggle/Colab with GPU support, install llama-cpp-python via: "
-                        "pip install llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121"
-                    )
                 model_file = self.model_path
                 if model_file.is_dir():
                     model_file = list(model_file.glob("*.gguf"))[0]
+                gguf_backend = os.environ.get("NAA_GGUF_BACKEND", "python").lower()
+                if gguf_backend in ("llama-server", "server", "external"):
+                    binary = os.environ.get("NAA_LLAMA_SERVER_BIN")
+                    if not binary or not Path(binary).is_file():
+                        raise RuntimeError(
+                            "NAA_GGUF_BACKEND=llama-server but NAA_LLAMA_SERVER_BIN "
+                            "does not point to a built llama-server executable."
+                        )
+                    logger.info(
+                        "Launching standalone llama-server backend for GGUF weights: %s",
+                        model_file,
+                    )
+                    self.model = LlamaServerBackend.launch(
+                        binary,
+                        str(model_file),
+                        n_ctx=self.n_ctx,
+                        n_gpu_layers=self.n_gpu_layers,
+                        flash_attn=self.flash_attn,
+                        cache_type_k=self.cache_type_k,
+                        cache_type_v=self.cache_type_v,
+                    )
+                else:
+                    if not LLAMA_CPP_AVAILABLE:
+                        raise RuntimeError(
+                            "Model is in GGUF format, but 'llama-cpp-python' is not installed. "
+                            "Install it or set NAA_GGUF_BACKEND=llama-server."
+                        )
+                    llama_kwargs: Dict[str, Any] = {
+                        "model_path": str(model_file),
+                        "n_ctx": self.n_ctx,
+                        "n_gpu_layers": self.n_gpu_layers,
+                        "verbose": False,
+                    }
+                    if self.flash_attn:
+                        llama_kwargs["flash_attn"] = True
 
-                llama_kwargs: Dict[str, Any] = {
-                    "model_path": str(model_file),
-                    "n_ctx": self.n_ctx,
-                    "n_gpu_layers": self.n_gpu_layers,
-                    "verbose": False,
-                }
-                if self.flash_attn:
-                    llama_kwargs["flash_attn"] = True
+                    type_k_val = self._map_ggml_type(self.cache_type_k)
+                    if type_k_val is not None:
+                        llama_kwargs["type_k"] = type_k_val
 
-                type_k_val = self._map_ggml_type(self.cache_type_k)
-                if type_k_val is not None:
-                    llama_kwargs["type_k"] = type_k_val
+                    type_v_val = self._map_ggml_type(self.cache_type_v)
+                    if type_v_val is not None:
+                        llama_kwargs["type_v"] = type_v_val
 
-                type_v_val = self._map_ggml_type(self.cache_type_v)
-                if type_v_val is not None:
-                    llama_kwargs["type_v"] = type_v_val
-
-                logger.info(f"Initializing llama_cpp.Llama with GGUF weights: {model_file}")
-                self.model = llama_cpp.Llama(**llama_kwargs)
+                    logger.info(f"Initializing llama_cpp.Llama with GGUF weights: {model_file}")
+                    self.model = llama_cpp.Llama(**llama_kwargs)
             else:
                 # Load Safetensors / Hugging Face model
                 try:

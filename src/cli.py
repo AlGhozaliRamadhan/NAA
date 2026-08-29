@@ -262,7 +262,108 @@ def _install_llama_cpp_cuda(force_source: bool = False) -> bool:
     )
 
 
+def _ensure_standalone_llama_server() -> bool:
+    """Build only the current standalone llama-server for new GGUF architectures."""
+
+    explicit = os.environ.get("NAA_LLAMA_SERVER_BIN")
+    if explicit and Path(explicit).is_file():
+        info(f"Using standalone llama-server: {explicit}")
+        return True
+
+    if not ENV.get("is_gpu", False):
+        err("The standalone llama-server setup currently requires an NVIDIA GPU.")
+        return False
+
+    arch = _cuda_compute_arch()
+    if not arch:
+        err("Could not detect the GPU compute capability for llama-server.")
+        return False
+
+    ref = os.environ.get("NAA_LLAMA_CPP_REF", "b10621")
+    safe_ref = "".join(char if char.isalnum() else "_" for char in ref)
+    source_dir = Path(WORK_DIR) / f".naa_llama_cpp_{safe_ref}"
+    binary = source_dir / "build" / "bin" / (
+        "llama-server.exe" if os.name == "nt" else "llama-server"
+    )
+    if binary.is_file():
+        os.environ["NAA_LLAMA_SERVER_BIN"] = str(binary)
+        info(f"Using the existing llama-server {ref} build for sm_{arch}.")
+        return True
+
+    header(f"Building standalone llama-server {ref}")
+    info(
+        "This compiles only the current llama.cpp server. It avoids the older "
+        "CUDA engine embedded in llama-cpp-python."
+    )
+    if not source_dir.exists():
+        clone = subprocess.run(
+            [
+                "git",
+                "clone",
+                "--depth",
+                "1",
+                "--branch",
+                ref,
+                "https://github.com/ggml-org/llama.cpp.git",
+                str(source_dir),
+            ],
+            check=False,
+        )
+        if clone.returncode != 0:
+            err("Could not download the requested llama.cpp source revision.")
+            return False
+
+    configure = subprocess.run(
+        [
+            "cmake",
+            "-S",
+            str(source_dir),
+            "-B",
+            str(source_dir / "build"),
+            "-DGGML_CUDA=ON",
+            f"-DCMAKE_CUDA_ARCHITECTURES={arch}",
+            "-DGGML_NATIVE=OFF",
+            "-DBUILD_SHARED_LIBS=OFF",
+            "-DLLAMA_BUILD_TESTS=OFF",
+            "-DLLAMA_BUILD_EXAMPLES=OFF",
+            "-DLLAMA_CURL=OFF",
+            "-DCMAKE_BUILD_TYPE=Release",
+        ],
+        check=False,
+    )
+    if configure.returncode != 0:
+        err("CMake could not configure the standalone llama-server build.")
+        return False
+
+    parallel = os.environ.get("NAA_LLAMA_BUILD_JOBS", "2")
+    build = subprocess.run(
+        [
+            "cmake",
+            "--build",
+            str(source_dir / "build"),
+            "--config",
+            "Release",
+            "--target",
+            "llama-server",
+            "--parallel",
+            parallel,
+        ],
+        check=False,
+    )
+    if build.returncode != 0 or not binary.is_file():
+        err("The standalone llama-server CUDA build failed.")
+        return False
+
+    os.environ["NAA_LLAMA_SERVER_BIN"] = str(binary)
+    ok(f"Standalone llama-server is ready: {binary}")
+    return True
+
+
 def ensure_gguf_deps() -> bool:
+    gguf_backend = os.environ.get("NAA_GGUF_BACKEND", "python").lower()
+    if gguf_backend in ("llama-server", "server", "external"):
+        return _ensure_standalone_llama_server()
+
     minimum = (0, 3, 25)
     force_gpu_build = os.environ.get("NAA_FORCE_LLAMA_CPP_REBUILD", "0").lower() in (
         "1", "true", "yes",
@@ -306,6 +407,21 @@ def ensure_gguf_deps() -> bool:
     else:
         err("Could not install a compatible llama-cpp-python backend.")
     return success
+
+
+def _select_gguf_backend(model_cfg: Dict[str, Any]) -> None:
+    """Prefer a current standalone engine for Qwen3.8's new CUDA path."""
+
+    if os.environ.get("NAA_GGUF_BACKEND"):
+        return
+    filename = str(model_cfg.get("file", ""))
+    name = str(model_cfg.get("name", ""))
+    if filename.lower().endswith(".gguf") and "qwen3.8" in f"{name} {filename}".lower():
+        os.environ["NAA_GGUF_BACKEND"] = "llama-server"
+        info(
+            "Qwen3.8 GGUF detected; selecting the current standalone "
+            "llama-server CUDA backend."
+        )
 
 
 def _repair_gguf_cuda_backend() -> bool:
@@ -632,7 +748,8 @@ def _apply_gguf_memory_recovery(
                 changes.append(f"{key}=f16(default)")
         if changes:
             warn("Applying native-backend recovery: " + ", ".join(changes))
-        return bool(changes)
+        # Fall through to also apply GPU-layer / context reductions so the
+        # next restart uses a genuinely smaller memory footprint.
 
     try:
         context = int(os.environ.get("NAA_CTX", str(settings.max_context)))
@@ -651,8 +768,16 @@ def _apply_gguf_memory_recovery(
 
     # A 13+ GB GGUF with every layer offloaded leaves too little space for
     # context and compute buffers on a 15 GB T4.  Each subsequent hard crash
-    # moves another eight layers to system RAM.
-    if gpu_layers < 0:
+    # moves another eight layers to system RAM.  For native aborts, be more
+    # aggressive: cap at 32 on the first crash, then reduce further each time.
+    if native_abort:
+        if gpu_layers < 0 or gpu_layers > 32:
+            safer_layers = 32
+        elif gpu_layers > 16:
+            safer_layers = max(16, gpu_layers - 8)
+        else:
+            safer_layers = gpu_layers
+    elif gpu_layers < 0:
         safer_layers = 48
     elif attempt > 1 and gpu_layers > 16:
         safer_layers = max(16, gpu_layers - 8)
@@ -733,6 +858,7 @@ def cmd_setup(args: list = None):
     ensure_gguf_deps_fn = _get_attr("ensure_gguf_deps", ensure_gguf_deps)
 
     model_cfg = choose_model_fn(auto=target_arg)
+    _select_gguf_backend(model_cfg)
     install_deps()
     if model_cfg.get("file", "").endswith(".gguf") or model_cfg.get("quant", "").startswith("q"):
         if not ensure_gguf_deps_fn():
@@ -774,6 +900,7 @@ def cmd_start(args: list = None):
     model_path_str = state.get("model_path") if not model_arg else None
 
     model_cfg = choose_model_fn(auto=model_key)
+    _select_gguf_backend(model_cfg)
     if model_cfg.get("file", "").endswith(".gguf") or model_cfg.get("quant", "").startswith("q"):
         if not ensure_gguf_deps_fn():
             err("GGUF backend setup failed; model startup was cancelled.")
@@ -1036,10 +1163,13 @@ def cmd_start(args: list = None):
                     proc_restart_attempts += 1
                     _print_server_log_tail(40)
                     _apply_gguf_memory_recovery(model_path, proc_restart_attempts)
-                    if current_server_proc:
+                    # Re-fetch the proc reference; it may have changed if the
+                    # server was already restarted in this loop iteration.
+                    stale_proc = _get_attr("_server_proc", _server_proc)
+                    if stale_proc:
                         try:
-                            current_server_proc.terminate()
-                            current_server_proc.wait(5)
+                            stale_proc.terminate()
+                            stale_proc.wait(5)
                         except Exception: pass
                     start_server_fn(
                         model_path,

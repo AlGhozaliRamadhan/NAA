@@ -118,6 +118,14 @@ def _start_localhost_run_tunnel(
 ) -> Tuple[Optional[subprocess.Popen], Optional[str]]:
     """Start a free HTTPS reverse tunnel, falling back to anonymous access."""
 
+    # Terminate any stale SSH tunnel processes from previous runs to prevent collisions
+    if os.name != "nt":
+        try:
+            subprocess.run(["pkill", "-9", "-f", "ssh.*localhost.run"], capture_output=True, timeout=3)
+            time.sleep(0.5)
+        except Exception:
+            pass
+
     ssh_binary = os.environ.get("NAA_SSH_BINARY", "ssh").strip() or "ssh"
     known_hosts = os.environ.get(
         "NAA_SSH_KNOWN_HOSTS",
@@ -131,7 +139,7 @@ def _start_localhost_run_tunnel(
         "-o",
         f"UserKnownHostsFile={known_hosts}",
         "-o",
-        "ServerAliveInterval=30",
+        "ServerAliveInterval=15",
         "-o",
         "ServerAliveCountMax=3",
         "-o",

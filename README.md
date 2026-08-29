@@ -89,12 +89,11 @@ import os
 # Stable starting profile for a free 15 GB T4 and this 13.5 GB GGUF.
 os.environ["NAA_CTX"] = "8192"
 os.environ["NAA_MAX_TOKENS"] = "4096"
-os.environ["NAA_FLASH_ATTN"] = "1"
+os.environ["NAA_FLASH_ATTN"] = "0"
 os.environ["NAA_N_GPU_LAYERS"] = "48"
-os.environ["NAA_CACHE_TYPE_K"] = "q8_0"
-os.environ["NAA_CACHE_TYPE_V"] = "q8_0"
 os.environ["NAA_MODEL_WAIT_TIMEOUT"] = "600"
 os.environ["NAA_TUNNEL_PROVIDER"] = "localhost-run"
+os.environ["NAA_FORCE_LLAMA_CPP_REBUILD"] = "1"  # One build per notebook runtime/GPU
 
 !pip install -q -r requirements.txt
 !python naa.py start --model "https://huggingface.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED/blob/main/Qwen3.8-27B-OBLITERATED-Q3_K_M.gguf"
@@ -285,7 +284,7 @@ os.environ["NAA_TUNNEL_PROVIDER"] = "localhost-run"
 
 Then start NAA normally. The API summary will print the generated URL and the `naa-...` API key. NAA creates a dedicated local SSH identity, enables keepalives, and reuses that identity when reconnecting so the free hostname can be retained within the notebook runtime. Free hostnames still expire periodically and the service has no uptime guarantee; if localhost.run assigns a new URL, NAA prints the new API base prominently and the client must be updated.
 
-For a 15 GB Colab T4, do not fully offload a 13.5 GB GGUF with a 16K context: model weights are not the only VRAM allocation. Start with `NAA_CTX=8192`, `NAA_N_GPU_LAYERS=48`, Flash Attention, and Q8 KV caches as shown in the Colab GGUF example. If a GGUF process is killed under memory pressure, NAA now prints the child log and automatically retries with progressively safer memory settings rather than silently repeating the same crash.
+For a 15 GB Colab T4, do not fully offload a 13.5 GB GGUF with a 16K context: model weights are not the only VRAM allocation. Start with `NAA_CTX=8192`, `NAA_N_GPU_LAYERS=48`, and Flash Attention disabled for the Qwen3.5/Qwen3.8 hybrid CUDA path, as shown in the Colab GGUF example. If a GGUF process is killed under memory pressure, NAA prints the child log and automatically retries with progressively safer memory settings. If the native CUDA library aborts, NAA performs one GPU-specific source rebuild instead of misdiagnosing it as OOM forever.
 
 ### Stable Cloudflare hostname
 
@@ -454,6 +453,8 @@ curl "https://YOUR-URL.trycloudflare.com/v1/admin/stats" \
 | `NAA_FLASH_ATTN` | `1` | Enable llama.cpp Flash Attention for GGUF inference |
 | `NAA_CACHE_TYPE_K` / `NAA_CACHE_TYPE_V` | None | Optional GGUF KV-cache types such as `q8_0` to reduce context memory |
 | `NAA_AUTO_MEMORY_RECOVERY` | `1` | After a hard GGUF crash, retry with safer context/cache/GPU-layer settings |
+| `NAA_AUTO_BACKEND_REPAIR` | `1` | After a native CUDA abort, rebuild llama-cpp-python once for the detected GPU architecture |
+| `NAA_FORCE_LLAMA_CPP_REBUILD` | `0` | Build llama-cpp-python once for the notebook GPU and reuse a runtime marker on subsequent starts |
 | `NAA_PORT` / `PORT` | `8000` | Local port for FastAPI server |
 | `NAA_RPM` | `30` | Default rate limit in requests per minute per key |
 | `NAA_SSE_HEARTBEAT` | `5.0` | Interval in seconds for SSE streaming keepalive comments |

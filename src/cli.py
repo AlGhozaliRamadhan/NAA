@@ -37,6 +37,7 @@ from src.supervisor.watchdog import (
 
 _server_proc: Optional[subprocess.Popen] = None
 _tunnel_proc: Optional[subprocess.Popen] = None
+_gguf_backend_repair_attempted = False
 
 RESET = "\033[0m"
 GREEN = "\033[32m"
@@ -160,9 +161,9 @@ def load_state() -> Dict[str, Any]:
         pass
     return {}
 
-def run_pip(packages: list, extra_args: list = None) -> bool:
+def run_pip(packages: list, extra_args: list = None, env: dict = None) -> bool:
     cmd = [sys.executable, "-m", "pip", "install"] + (extra_args or []) + packages
-    r = subprocess.run(cmd)
+    r = subprocess.run(cmd, env=env)
     return r.returncode == 0
 
 def install_deps():
@@ -175,28 +176,159 @@ def install_deps():
     run_pip(packages)
     ok("Dependencies ready")
 
+def _version_tuple(value: str) -> tuple[int, ...]:
+    parts = []
+    for part in value.split("."):
+        digits = "".join(char for char in part if char.isdigit())
+        if not digits:
+            break
+        parts.append(int(digits))
+    return tuple(parts)
+
+
+def _cuda_compute_arch() -> Optional[str]:
+    """Return the first NVIDIA GPU compute capability as a CMake arch."""
+
+    try:
+        result = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=compute_cap",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        capability = result.stdout.strip().splitlines()[0].strip()
+        major, minor = capability.split(".", 1)
+        if major.isdigit() and minor.isdigit():
+            return f"{major}{minor}"
+    except Exception:
+        pass
+    return None
+
+
+def _install_llama_cpp_cuda(force_source: bool = False) -> bool:
+    """Install a recent CUDA backend, optionally compiled for this exact GPU."""
+
+    requirement = os.environ.get(
+        "NAA_LLAMA_CPP_REQUIREMENT",
+        "llama-cpp-python>=0.3.25",
+    )
+    if force_source:
+        arch = _cuda_compute_arch()
+        if not arch:
+            warn("Cannot detect the GPU compute capability for a CUDA source build.")
+            return False
+        info(f"Rebuilding llama-cpp-python for CUDA compute capability sm_{arch}...")
+        build_env = os.environ.copy()
+        build_env["CMAKE_ARGS"] = (
+            f"-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES={arch} "
+            "-DGGML_NATIVE=OFF"
+        )
+        build_env["FORCE_CMAKE"] = "1"
+        build_env.setdefault("CMAKE_BUILD_PARALLEL_LEVEL", "2")
+        success = run_pip(
+            [requirement],
+            extra_args=[
+                "--upgrade",
+                "--force-reinstall",
+                "--no-cache-dir",
+                "--no-binary=llama-cpp-python",
+            ],
+            env=build_env,
+        )
+        if success:
+            try:
+                marker = Path(WORK_DIR) / f".naa_llama_cpp_cuda_sm{arch}.ok"
+                marker.write_text(requirement, encoding="utf-8")
+            except Exception:
+                pass
+        return success
+
+    info("Installing a current CUDA prebuilt wheel...")
+    return run_pip(
+        [requirement],
+        extra_args=[
+            "--upgrade",
+            "--force-reinstall",
+            "--no-cache-dir",
+            "--only-binary=llama-cpp-python",
+            "--extra-index-url",
+            "https://abetlen.github.io/llama-cpp-python/whl/cu121",
+        ],
+    )
+
+
 def ensure_gguf_deps() -> bool:
+    minimum = (0, 3, 25)
+    force_gpu_build = os.environ.get("NAA_FORCE_LLAMA_CPP_REBUILD", "0").lower() in (
+        "1", "true", "yes",
+    )
+    if force_gpu_build and ENV.get("is_gpu", False):
+        arch = _cuda_compute_arch()
+        marker = Path(WORK_DIR) / f".naa_llama_cpp_cuda_sm{arch}.ok" if arch else None
+        if marker is not None and marker.exists():
+            info(f"Using the existing GPU-specific llama.cpp build for sm_{arch}.")
+            return True
+        header("Building GPU-specific llama-cpp-python")
+        return _install_llama_cpp_cuda(force_source=True)
+
     try:
         import llama_cpp
-        return True
-    except ImportError:
-        header("Installing llama-cpp-python for GGUF support")
-        if ENV.get("is_gpu", False):
-            info("Detected GPU environment. Installing CUDA prebuilt wheel...")
-            success = run_pip(
-                ["llama-cpp-python>=0.2.80"],
-                extra_args=["--extra-index-url", "https://abetlen.github.io/llama-cpp-python/whl/cu121"]
-            )
-        else:
-            info("Installing CPU llama-cpp-python wheel...")
-            success = run_pip(["llama-cpp-python>=0.2.80"])
-
-        if success:
-            ok("llama-cpp-python installed successfully!")
+        installed = _version_tuple(getattr(llama_cpp, "__version__", "0"))
+        if installed >= minimum:
             return True
-        else:
-            warn("Failed to install prebuilt wheel, trying fallback standard install...")
-            return run_pip(["llama-cpp-python"])
+        warn(
+            f"llama-cpp-python {getattr(llama_cpp, '__version__', 'unknown')} "
+            "is too old for current Qwen3.5/Qwen3.8 GGUF support."
+        )
+    except ImportError:
+        pass
+
+    header("Installing llama-cpp-python for GGUF support")
+    if ENV.get("is_gpu", False):
+        success = _install_llama_cpp_cuda(force_source=False)
+        if not success:
+            warn("Prebuilt CUDA wheel failed; compiling for the detected GPU.")
+            success = _install_llama_cpp_cuda(force_source=True)
+    else:
+        info("Installing current CPU llama-cpp-python...")
+        success = run_pip(
+            ["llama-cpp-python>=0.3.25"],
+            extra_args=["--upgrade", "--no-cache-dir"],
+        )
+
+    if success:
+        ok("llama-cpp-python installed successfully!")
+    else:
+        err("Could not install a compatible llama-cpp-python backend.")
+    return success
+
+
+def _repair_gguf_cuda_backend() -> bool:
+    """Rebuild once after a native CUDA abort such as SIGILL or SIGABRT."""
+
+    global _gguf_backend_repair_attempted
+    if _gguf_backend_repair_attempted:
+        return False
+    if not ENV.get("is_gpu", False):
+        return False
+    enabled = os.environ.get("NAA_AUTO_BACKEND_REPAIR", "1").lower() in (
+        "1", "true", "yes",
+    )
+    if not enabled:
+        return False
+    _gguf_backend_repair_attempted = True
+    warn("Native CUDA backend aborted; rebuilding it for this notebook GPU.")
+    success = _install_llama_cpp_cuda(force_source=True)
+    if success:
+        ok("GPU-specific llama-cpp-python rebuild completed.")
+    else:
+        err("GPU-specific llama-cpp-python rebuild failed; see pip/CMake output above.")
+    return success
 
 def parse_model_target(target: Optional[str]) -> Dict[str, str]:
     """
@@ -427,8 +559,10 @@ def start_server(
     if system_prompt:
         env["NAA_SYSTEM_PROMPT"] = system_prompt
 
-    log_handle = open(SERVER_LOG, "a", encoding="utf-8")
-    log_handle.write(f"\n\n========== restart @ {time.strftime('%Y-%m-%d %H:%M:%S')} ==========\n")
+    # Keep only the current child run so a native crash's root error is not
+    # pushed out of the diagnostic tail by several restart banners.
+    log_handle = open(SERVER_LOG, "w", encoding="utf-8")
+    log_handle.write(f"========== start @ {time.strftime('%Y-%m-%d %H:%M:%S')} ==========\n")
     log_handle.flush()
 
     proc = subprocess.Popen(
@@ -471,7 +605,11 @@ def _print_server_log_tail(limit: int = 30) -> None:
     print("------------------------------\n")
 
 
-def _apply_gguf_memory_recovery(model_path: Path, attempt: int) -> bool:
+def _apply_gguf_memory_recovery(
+    model_path: Path,
+    attempt: int,
+    return_code: Optional[int] = None,
+) -> bool:
     """Stage a safer llama.cpp profile after a hard GGUF server crash."""
 
     enabled = os.environ.get("NAA_AUTO_MEMORY_RECOVERY", "1").lower() in (
@@ -481,6 +619,21 @@ def _apply_gguf_memory_recovery(model_path: Path, attempt: int) -> bool:
         return False
 
     changes = []
+    native_abort = return_code in (-4, -6, -11)
+    if native_abort:
+        # SIGILL/SIGABRT/SIGSEGV inside libggml-cuda indicates a native kernel
+        # or backend compatibility fault, not ordinary VRAM exhaustion.  Keep
+        # the next boot conservative while the supervisor rebuilds the backend.
+        if os.environ.get("NAA_FLASH_ATTN", "1").lower() not in ("0", "false", "no"):
+            os.environ["NAA_FLASH_ATTN"] = "0"
+            changes.append("Flash Attention disabled")
+        for key in ("NAA_CACHE_TYPE_K", "NAA_CACHE_TYPE_V"):
+            if os.environ.pop(key, None) is not None:
+                changes.append(f"{key}=f16(default)")
+        if changes:
+            warn("Applying native-backend recovery: " + ", ".join(changes))
+        return bool(changes)
+
     try:
         context = int(os.environ.get("NAA_CTX", str(settings.max_context)))
     except ValueError:
@@ -488,11 +641,6 @@ def _apply_gguf_memory_recovery(model_path: Path, attempt: int) -> bool:
     if context > 8192:
         os.environ["NAA_CTX"] = "8192"
         changes.append(f"context {context}->8192")
-
-    for key in ("NAA_CACHE_TYPE_K", "NAA_CACHE_TYPE_V"):
-        if not os.environ.get(key):
-            os.environ[key] = "q8_0"
-            changes.append(f"{key}=q8_0")
 
     try:
         gpu_layers = int(
@@ -587,7 +735,9 @@ def cmd_setup(args: list = None):
     model_cfg = choose_model_fn(auto=target_arg)
     install_deps()
     if model_cfg.get("file", "").endswith(".gguf") or model_cfg.get("quant", "").startswith("q"):
-        ensure_gguf_deps_fn()
+        if not ensure_gguf_deps_fn():
+            err("GGUF backend setup failed; model startup was cancelled.")
+            return
 
     model_path = download_model_fn(model_cfg)
     model_key = target_arg or "auto"
@@ -625,7 +775,9 @@ def cmd_start(args: list = None):
 
     model_cfg = choose_model_fn(auto=model_key)
     if model_cfg.get("file", "").endswith(".gguf") or model_cfg.get("quant", "").startswith("q"):
-        ensure_gguf_deps_fn()
+        if not ensure_gguf_deps_fn():
+            err("GGUF backend setup failed; model startup was cancelled.")
+            return
 
     if model_path_str and Path(model_path_str).exists() and is_model_complete(Path(model_path_str), model_cfg):
         model_path = Path(model_path_str)
@@ -843,7 +995,13 @@ def cmd_start(args: list = None):
                         current_server_proc.wait(timeout=5)
                     except Exception: pass
                 proc_restart_attempts += 1
-                _apply_gguf_memory_recovery(model_path, proc_restart_attempts)
+                if return_code in (-4, -6, -11):
+                    _repair_gguf_cuda_backend()
+                _apply_gguf_memory_recovery(
+                    model_path,
+                    proc_restart_attempts,
+                    return_code=return_code,
+                )
                 if proc_restart_attempts > 5:
                     err("Server crashed repeatedly; stopping instead of hiding an endless restart loop.")
                     current_tunnel_proc = _get_attr("_tunnel_proc", _tunnel_proc)

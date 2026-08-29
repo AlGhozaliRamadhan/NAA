@@ -721,6 +721,11 @@ def cmd_start(args: list = None):
     if public_url:
         save_state_fn({"public_url": public_url})
         ok(f"Tunnel URL: {public_url}")
+        if "trycloudflare.com" in public_url:
+            warn(
+                "Quick Tunnels do not support SSE. Basic API calls may work, "
+                "but OpenCode and Claude Code require a named Cloudflare Tunnel."
+            )
     else:
         public_url = f"http://localhost:{PORT}"
 
@@ -794,6 +799,9 @@ def cmd_start(args: list = None):
                     if mod:
                         setattr(mod, "_tunnel_proc", proc)
                     save_state_fn({"public_url": new_url})
+                    ok(f"Tunnel restarted: {new_url}")
+                    if "trycloudflare.com" in new_url:
+                        warn("Quick Tunnel restart changed the public URL; update the client.")
     except KeyboardInterrupt:
         info("Shutting down NAA...")
         current_server_proc = _get_attr("_server_proc", _server_proc)

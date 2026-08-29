@@ -266,6 +266,20 @@ print(response.content)
 
 NAA exposes both tool-capable OpenAI Chat Completions and an Anthropic Messages compatibility endpoint. The client, not NAA, executes filesystem, shell, and editor tools; NAA returns a structured request and the client sends the result back for the next model turn.
 
+> **Use a named Cloudflare Tunnel for coding agents.** Cloudflare's free random `trycloudflare.com` Quick Tunnels explicitly do not support Server-Sent Events (SSE), which OpenCode and Claude Code require. Quick Tunnels remain useful for basic testing, but they are not a reliable agent transport.
+
+Create a remotely-managed tunnel in Cloudflare, publish a hostname whose service URL is `http://localhost:8000`, and set these variables before starting NAA:
+
+```python
+import os
+from getpass import getpass
+
+os.environ["NAA_CF_TUNNEL_TOKEN"] = getpass("Cloudflare tunnel token: ")
+os.environ["NAA_PUBLIC_URL"] = "https://naa.example.com"
+```
+
+NAA will run `cloudflared` with the token, keep the stable hostname across tunnel restarts, and display that hostname in the API summary. Do not paste the tunnel token into a shared notebook or commit it to Git.
+
 Use a model trained for tool calling. The bridge can translate a correct native call into the client protocol, but it cannot make a base or weakly trained model reliably choose appropriate tools. Coder/instruct variants with an embedded tool-aware chat template work best.
 
 Coding agents send large system prompts and tool schemas. The default context is 8,192 tokens; set `NAA_CTX=32768` (or another value supported by the model and available KV-cache memory) before `naa.py start` for longer agent sessions, then make the client `limit.context` match it.
@@ -285,7 +299,7 @@ Create `opencode.json` in the project using NAA's `/v1` base URL. Replace the mo
       "npm": "@ai-sdk/openai-compatible",
       "name": "NAA",
       "options": {
-        "baseURL": "https://YOUR-URL.trycloudflare.com/v1",
+        "baseURL": "https://naa.example.com/v1",
         "apiKey": "{env:NAA_API_KEY}"
       },
       "models": {
@@ -312,7 +326,7 @@ opencode
 Claude Code uses the Anthropic Messages API, so its base URL must be the server root without `/v1`. NAA publishes the stable `claude-naa` alias for optional gateway model discovery:
 
 ```powershell
-$env:ANTHROPIC_BASE_URL = "https://YOUR-URL.trycloudflare.com"
+$env:ANTHROPIC_BASE_URL = "https://naa.example.com"
 $env:ANTHROPIC_AUTH_TOKEN = "naa-YOUR_KEY"
 $env:CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY = "1"
 claude --model claude-naa
@@ -419,6 +433,8 @@ curl "https://YOUR-URL.trycloudflare.com/v1/admin/stats" \
 | `NAA_RPM` | `30` | Default rate limit in requests per minute per key |
 | `NAA_SSE_HEARTBEAT` | `5.0` | Interval in seconds for SSE streaming keepalive comments |
 | `NAA_MODEL_WAIT_TIMEOUT` | `600.0` | Maximum seconds an agent SSE request waits for a reloading model while receiving keepalives |
+| `NAA_CF_TUNNEL_TOKEN` | None | Token for a remotely-managed Cloudflare Tunnel; required for reliable SSE agent traffic |
+| `NAA_PUBLIC_URL` | None | Stable HTTPS hostname configured for the remotely-managed tunnel, such as `https://naa.example.com` |
 
 ---
 

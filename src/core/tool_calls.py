@@ -23,6 +23,112 @@ TOOL_RECOVERY_PROMPT = (
 )
 
 
+def strip_think_tags(text: str) -> str:
+    """Remove <think>...</think> reasoning blocks from a complete string.
+
+    Thinking models (Qwen3, DeepSeek-R1, etc.) prefix responses with an
+    internal scratchpad wrapped in <think> tags.  OpenAI-format clients have
+    no structured field for reasoning content, so we strip it before sending.
+    """
+    if not text or "<think" not in text.lower():
+        return text
+    cleaned = re.sub(
+        r"<think\b[^>]*>.*?</think>",
+        "",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    return cleaned.lstrip("\n").strip()
+
+
+class ThinkTagFilter:
+    """Stateful streaming filter: suppress <think>...</think> blocks.
+
+    Designed to be fed one raw chunk at a time.  Only the small tag-boundary
+    window is buffered — the (potentially thousands-of-tokens) think content
+    itself is discarded without being held in memory.
+
+    Usage::
+
+        flt = ThinkTagFilter()
+        for raw_chunk in model_stream:
+            visible = flt.feed(raw_chunk)
+            if visible:
+                send_to_client(visible)
+        send_to_client(flt.finish())
+    """
+
+    _OPEN = "<think"
+    _CLOSE = "</think>"
+    _OPEN_KEEP = len("<think") - 1   # 5 — chars to keep to catch split opening tags
+    _CLOSE_KEEP = len("</think>") - 1  # 7 — chars to keep to catch split closing tags
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._in_think = False
+        self._done = False  # True once the first </think> has been seen
+
+    def feed(self, chunk: str) -> str:
+        """Return the portion of *chunk* that should be sent to the client."""
+        if not isinstance(chunk, str):
+            return ""
+        if self._done:
+            return chunk  # Fast path after think block is closed
+
+        self._pending += chunk
+        output: List[str] = []
+
+        while self._pending:
+            if self._in_think:
+                lo = self._pending.lower()
+                pos = lo.find("</think>")
+                if pos >= 0:
+                    # Closing tag found — discard everything up to and
+                    # including it, strip the trailing newline, then resume.
+                    after = self._pending[pos + len("</think>"):]
+                    self._in_think = False
+                    self._done = True
+                    self._pending = ""
+                    output.append(after.lstrip("\n"))
+                    break
+                # Still inside think block — discard, keep only boundary.
+                keep = min(self._CLOSE_KEEP, len(self._pending))
+                self._pending = self._pending[-keep:]
+                break
+            else:
+                lo = self._pending.lower()
+                pos = lo.find("<think")
+                if pos >= 0:
+                    # Emit everything before <think.
+                    output.append(self._pending[:pos])
+                    rest = self._pending[pos:]
+                    # Wait until we have the full opening tag (up to ">").
+                    end = rest.find(">")
+                    if end >= 0:
+                        self._pending = rest[end + 1:]
+                        self._in_think = True
+                        # Loop: handle </think> in the same pending buffer.
+                    else:
+                        # Tag is split across chunks — buffer until next chunk.
+                        self._pending = rest
+                        break
+                else:
+                    # No opening tag yet; release safe prefix.
+                    keep = min(self._OPEN_KEEP, len(self._pending))
+                    if len(self._pending) > keep:
+                        output.append(self._pending[:-keep])
+                        self._pending = self._pending[-keep:]
+                    break
+
+        return "".join(output)
+
+    def finish(self) -> str:
+        """Flush remaining buffered content after the stream ends."""
+        result = "" if self._in_think else self._pending
+        self._pending = ""
+        return result
+
+
 class ToolTextStreamBuffer:
     """Release ordinary text while retaining possible native tool markup.
 
@@ -32,7 +138,14 @@ class ToolTextStreamBuffer:
     structured parsing.
     """
 
-    _MARKERS = ("<tool_call", "<function=", "<function name=", "[tool_calls]")
+    _MARKERS = (
+        "<tool_call",
+        "<function",
+        "<parameter",
+        "[tool_calls]",
+        "<tool_use",
+        "<tool>",
+    )
 
     def __init__(self, hold_all: bool = False):
         self.hold_all = hold_all
@@ -207,7 +320,13 @@ def _canonical_name(name: Any, names: Dict[str, str]) -> Optional[str]:
     name = name.strip()
     if not names:
         return name
-    return names.get(name.lower())
+    if name.lower() in names:
+        return names[name.lower()]
+    normalized = name.lower().replace("-", "_").replace(" ", "_")
+    for k, v in names.items():
+        if k.replace("-", "_") == normalized:
+            return v
+    return name
 
 
 def _call_from_object(value: Any, names: Dict[str, str]) -> List[Tuple[str, Dict[str, Any]]]:
@@ -264,25 +383,40 @@ def _parse_jsonish(text: str, names: Dict[str, str]) -> List[Tuple[str, Dict[str
 
 
 def _parse_xml_function(text: str, names: Dict[str, str]) -> List[Tuple[str, Dict[str, Any]]]:
+    # Match <function=Bash>, <function name="Bash">, <function:Bash>, etc.
+    # Accepts closing tag or unclosed up to next <function, </tool_call>, or end of string.
     function_re = re.compile(
-        r"<function(?:\s*=\s*|\s+name\s*=\s*[\"']?)([A-Za-z0-9_.:-]+)[\"']?\s*>"
-        r"(.*?)</function>",
+        r"<function(?:\s*=\s*|\s+name\s*=\s*[\"']?|:\s*|\s+)([A-Za-z0-9_.:-]+)[\"']?(?:\s*>|\s*\n)(.*?)(?:</function>|(?=<function|</tool_call|\Z))",
         re.IGNORECASE | re.DOTALL,
     )
     parameter_re = re.compile(
-        r"<parameter(?:\s*=\s*|\s+name\s*=\s*[\"']?)([A-Za-z0-9_.:-]+)[\"']?\s*>"
-        r"(.*?)</parameter>",
+        r"<parameter(?:\s*=\s*|\s+name\s*=\s*[\"']?|:\s*|\s+)([A-Za-z0-9_.:-]+)[\"']?(?:\s*>|\s*\n)(.*?)(?:</parameter>|(?=<parameter|</function|</tool_call|\Z))",
         re.IGNORECASE | re.DOTALL,
     )
     calls: List[Tuple[str, Dict[str, Any]]] = []
     for match in function_re.finditer(text):
-        name = _canonical_name(match.group(1), names)
+        raw_name = match.group(1)
+        name = _canonical_name(raw_name, names)
         if not name:
             continue
-        arguments = {
-            parameter.group(1): _coerce_value(parameter.group(2))
-            for parameter in parameter_re.finditer(match.group(2))
-        }
+        body = match.group(2)
+        arguments: Dict[str, Any] = {}
+        for parameter in parameter_re.finditer(body):
+            pname = parameter.group(1).strip()
+            arguments[pname] = _coerce_value(parameter.group(2).strip())
+        if not arguments:
+            tag_pattern = re.compile(r"<([A-Za-z0-9_-]+)>(.*?)(?:</\1>|(?=<\w+|\Z))", re.DOTALL)
+            for tmatch in tag_pattern.finditer(body):
+                tname = tmatch.group(1).strip()
+                if tname.lower() not in ("function", "tool_call", "tool_calls", "parameter"):
+                    arguments[tname] = _coerce_value(tmatch.group(2).strip())
+        if not arguments and body.strip():
+            try:
+                jargs = json.loads(body.strip())
+                if isinstance(jargs, dict):
+                    arguments = jargs
+            except Exception:
+                pass
         calls.append((name, arguments))
     return calls
 
@@ -310,7 +444,7 @@ def parse_tool_calls(
     raw_calls: List[Tuple[str, Dict[str, Any]]] = []
     spans: List[Tuple[int, int]] = []
 
-    block_re = re.compile(r"<tool_call\b[^>]*>(.*?)</tool_call>", re.IGNORECASE | re.DOTALL)
+    block_re = re.compile(r"<tool_call\b[^>]*>(.*?)(?:</tool_call>|\Z)", re.IGNORECASE | re.DOTALL)
     for match in block_re.finditer(text):
         calls = _parse_jsonish(match.group(1), names) or _parse_xml_function(match.group(1), names)
         if calls:
@@ -323,7 +457,7 @@ def parse_tool_calls(
         if xml_calls:
             raw_calls.extend(xml_calls)
             for match in re.finditer(
-                r"<function(?:\s*=\s*|\s+name\s*=).*?</function>",
+                r"<function(?:\s*=\s*|\s+name\s*=).*?(?:</function>|(?=<function|</tool_call|\Z))",
                 text,
                 re.IGNORECASE | re.DOTALL,
             ):
@@ -351,7 +485,10 @@ def parse_tool_calls(
     clean = text
     for start, end in sorted(spans, reverse=True):
         clean = clean[:start] + clean[end:]
-    clean = re.sub(r"</?tool_call\b[^>]*>", "", clean, flags=re.IGNORECASE).strip()
+    clean = re.sub(r"</?tool_call\b[^>]*>", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"</?function\b[^>]*>", "", clean, flags=re.IGNORECASE)
+    clean = re.sub(r"</?parameter\b[^>]*>", "", clean, flags=re.IGNORECASE)
+    clean = clean.strip()
     structured = [_structured_call(name, arguments, i) for i, (name, arguments) in enumerate(raw_calls)]
     return clean or None, structured
 

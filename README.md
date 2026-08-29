@@ -268,6 +268,18 @@ NAA exposes both tool-capable OpenAI Chat Completions and an Anthropic Messages 
 
 > **Use a named Cloudflare Tunnel for coding agents.** Cloudflare's free random `trycloudflare.com` Quick Tunnels explicitly do not support Server-Sent Events (SSE), which OpenCode and Claude Code require. Quick Tunnels remain useful for basic testing, but they are not a reliable agent transport.
 
+### Completely free, no account or token
+
+NAA can instead use an anonymous [localhost.run](https://localhost.run/) SSH tunnel. It provides an automatically generated HTTPS URL without an account, token, domain, or extra download:
+
+```python
+os.environ["NAA_TUNNEL_PROVIDER"] = "localhost-run"
+```
+
+Then start NAA normally. The API summary will print the generated URL and the `naa-...` API key. Anonymous tunnel URLs are temporary and can change after a reconnect, and the free service has no uptime guarantee. NAA enables SSH keepalives and automatically restarts the tunnel; if the URL changes, update the client to the newly printed URL.
+
+### Stable Cloudflare hostname
+
 Create a remotely-managed tunnel in Cloudflare, publish a hostname whose service URL is `http://localhost:8000`, and set these variables before starting NAA:
 
 ```python
@@ -433,6 +445,7 @@ curl "https://YOUR-URL.trycloudflare.com/v1/admin/stats" \
 | `NAA_RPM` | `30` | Default rate limit in requests per minute per key |
 | `NAA_SSE_HEARTBEAT` | `5.0` | Interval in seconds for SSE streaming keepalive comments |
 | `NAA_MODEL_WAIT_TIMEOUT` | `600.0` | Maximum seconds an agent SSE request waits for a reloading model while receiving keepalives |
+| `NAA_TUNNEL_PROVIDER` | `cloudflare` | Tunnel transport: `cloudflare`, `localhost-run` (free/no signup), or `none` |
 | `NAA_CF_TUNNEL_TOKEN` | None | Token for a remotely-managed Cloudflare Tunnel; required for reliable SSE agent traffic |
 | `NAA_PUBLIC_URL` | None | Stable HTTPS hostname configured for the remotely-managed tunnel, such as `https://naa.example.com` |
 

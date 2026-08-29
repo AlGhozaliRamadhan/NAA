@@ -4,6 +4,7 @@ Cloudflare Quick Tunnel Management
 
 import os
 import queue
+import re
 import time
 import platform
 import subprocess
@@ -21,6 +22,7 @@ CLOUDFLARED_URLS = {
 }
 
 _TUNNEL_LOGS: Deque[str] = deque(maxlen=200)
+_HTTPS_URL_RE = re.compile(r"https://[^\s<>\[\]()]+", re.IGNORECASE)
 
 
 def tunnel_log_tail(limit: int = 20) -> list[str]:
@@ -53,6 +55,84 @@ def _drain_output(
             stdout.close()
         except Exception:
             pass
+
+
+def _localhost_run_url(line: str) -> Optional[str]:
+    """Extract the anonymous public URL printed by localhost.run."""
+
+    for match in _HTTPS_URL_RE.findall(line):
+        candidate = match.rstrip(".,;:'\"")
+        lowered = candidate.lower()
+        if ".lhr.life" in lowered or (
+            ".localhost.run" in lowered
+            and "admin.localhost.run" not in lowered
+        ):
+            return candidate.rstrip("/")
+    return None
+
+
+def _start_localhost_run_tunnel(
+    port: int,
+) -> Tuple[Optional[subprocess.Popen], Optional[str]]:
+    """Start a free anonymous HTTPS reverse tunnel over SSH."""
+
+    ssh_binary = os.environ.get("NAA_SSH_BINARY", "ssh").strip() or "ssh"
+    known_hosts = os.environ.get(
+        "NAA_SSH_KNOWN_HOSTS",
+        "/tmp/naa_localhost_run_known_hosts",
+    )
+    command = [
+        ssh_binary,
+        "-T",
+        "-o",
+        "StrictHostKeyChecking=accept-new",
+        "-o",
+        f"UserKnownHostsFile={known_hosts}",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-o",
+        "ExitOnForwardFailure=yes",
+        "-R",
+        f"80:localhost:{port}",
+        "nokey@localhost.run",
+    ]
+    proc = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    lines: queue.Queue = queue.Queue()
+    startup_done = threading.Event()
+    threading.Thread(
+        target=_drain_output,
+        args=(proc, lines, startup_done),
+        daemon=True,
+        name="naa-localhost-run-log-drain",
+    ).start()
+
+    deadline = time.time() + 60
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            break
+        try:
+            line = lines.get(timeout=0.5)
+        except queue.Empty:
+            continue
+        public_url = _localhost_run_url(line)
+        if public_url:
+            startup_done.set()
+            return proc, public_url
+
+    startup_done.set()
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    return None, None
 
 def cf_binary_path() -> Path:
     suffix = ".exe" if platform.system().lower() == "windows" else ""
@@ -88,6 +168,15 @@ def start_tunnel(port: int) -> Tuple[Optional[subprocess.Popen], Optional[str]]:
     """
 
     try:
+        provider = os.environ.get("NAA_TUNNEL_PROVIDER", "cloudflare").strip().lower()
+        if provider in {"localhost-run", "localhost.run", "localhostrun", "ssh"}:
+            return _start_localhost_run_tunnel(port)
+        if provider in {"none", "off", "disabled"}:
+            return None, None
+        if provider not in {"cloudflare", "quick", "trycloudflare"}:
+            _TUNNEL_LOGS.append(f"Unknown NAA_TUNNEL_PROVIDER: {provider}")
+            return None, None
+
         cf = download_cloudflared()
         tunnel_token = os.environ.get("NAA_CF_TUNNEL_TOKEN", "").strip()
         configured_url = os.environ.get("NAA_PUBLIC_URL", "").strip().rstrip("/")

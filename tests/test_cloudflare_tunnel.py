@@ -52,6 +52,7 @@ def test_quick_tunnel_extracts_url_and_drains_remaining_output(monkeypatch):
         "INF later diagnostic one\n",
         "INF later diagnostic two\n",
     ]
+    monkeypatch.setenv("NAA_TUNNEL_PROVIDER", "cloudflare")
     monkeypatch.delenv("NAA_CF_TUNNEL_TOKEN", raising=False)
     monkeypatch.delenv("NAA_PUBLIC_URL", raising=False)
     monkeypatch.setattr(cloudflare, "download_cloudflared", lambda: "/tmp/cloudflared")
@@ -74,6 +75,7 @@ def test_quick_tunnel_extracts_url_and_drains_remaining_output(monkeypatch):
 
 def test_named_tunnel_uses_token_and_stable_public_url(monkeypatch):
     captured = []
+    monkeypatch.setenv("NAA_TUNNEL_PROVIDER", "cloudflare")
     monkeypatch.setenv("NAA_CF_TUNNEL_TOKEN", "secret-test-token")
     monkeypatch.setenv("NAA_PUBLIC_URL", "https://naa.example.com/")
     monkeypatch.setattr(cloudflare, "download_cloudflared", lambda: "/tmp/cloudflared")
@@ -95,6 +97,7 @@ def test_named_tunnel_uses_token_and_stable_public_url(monkeypatch):
 
 
 def test_named_tunnel_requires_public_url(monkeypatch):
+    monkeypatch.setenv("NAA_TUNNEL_PROVIDER", "cloudflare")
     monkeypatch.setenv("NAA_CF_TUNNEL_TOKEN", "secret-test-token")
     monkeypatch.delenv("NAA_PUBLIC_URL", raising=False)
     monkeypatch.setattr(cloudflare, "download_cloudflared", lambda: "/tmp/cloudflared")
@@ -104,3 +107,27 @@ def test_named_tunnel_requires_public_url(monkeypatch):
     assert proc is None
     assert url is None
     assert "NAA_PUBLIC_URL is missing" in cloudflare.tunnel_log_tail(1)[0]
+
+
+def test_localhost_run_uses_anonymous_ssh_tunnel(monkeypatch):
+    captured = []
+    monkeypatch.setenv("NAA_TUNNEL_PROVIDER", "localhost-run")
+    monkeypatch.delenv("NAA_CF_TUNNEL_TOKEN", raising=False)
+    monkeypatch.delenv("NAA_PUBLIC_URL", raising=False)
+    monkeypatch.setattr(
+        cloudflare.subprocess,
+        "Popen",
+        _fake_popen_factory(
+            captured,
+            ["Connect to https://bright-example.lhr.life with tls termination\n"],
+        ),
+    )
+
+    proc, url = cloudflare.start_tunnel(8000)
+
+    assert proc.poll() is None
+    assert url == "https://bright-example.lhr.life"
+    assert captured[0][0] == "ssh"
+    assert "nokey@localhost.run" == captured[0][-1]
+    assert "80:localhost:8000" in captured[0]
+    assert "ServerAliveInterval=30" in captured[0]

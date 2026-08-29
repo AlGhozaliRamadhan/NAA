@@ -726,6 +726,11 @@ def cmd_start(args: list = None):
                 "Quick Tunnels do not support SSE. Basic API calls may work, "
                 "but OpenCode and Claude Code require a named Cloudflare Tunnel."
             )
+        elif "lhr.life" in public_url or "localhost.run" in public_url:
+            warn(
+                "localhost.run is free and supports the agent stream, but its "
+                "anonymous URL may change after a reconnect."
+            )
     else:
         public_url = f"http://localhost:{PORT}"
 
@@ -802,6 +807,8 @@ def cmd_start(args: list = None):
                     ok(f"Tunnel restarted: {new_url}")
                     if "trycloudflare.com" in new_url:
                         warn("Quick Tunnel restart changed the public URL; update the client.")
+                    elif "lhr.life" in new_url or "localhost.run" in new_url:
+                        warn("Free tunnel reconnected; update the client if its URL changed.")
     except KeyboardInterrupt:
         info("Shutting down NAA...")
         current_server_proc = _get_attr("_server_proc", _server_proc)

@@ -116,15 +116,14 @@ def _ensure_localhost_run_identity() -> Optional[Path]:
 def _start_localhost_run_tunnel(
     port: int,
 ) -> Tuple[Optional[subprocess.Popen], Optional[str]]:
-    """Start a free anonymous HTTPS reverse tunnel over SSH."""
+    """Start a free HTTPS reverse tunnel, falling back to anonymous access."""
 
     ssh_binary = os.environ.get("NAA_SSH_BINARY", "ssh").strip() or "ssh"
     known_hosts = os.environ.get(
         "NAA_SSH_KNOWN_HOSTS",
         "/tmp/naa_localhost_run_known_hosts",
     )
-    identity = _ensure_localhost_run_identity()
-    command = [
+    base_command = [
         ssh_binary,
         "-T",
         "-o",
@@ -138,59 +137,82 @@ def _start_localhost_run_tunnel(
         "-o",
         "ExitOnForwardFailure=yes",
     ]
+
+    def launch(command: list[str], timeout: float) -> Tuple[Optional[subprocess.Popen], Optional[str]]:
+        proc = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        lines: queue.Queue = queue.Queue()
+        startup_done = threading.Event()
+        threading.Thread(
+            target=_drain_output,
+            args=(proc, lines, startup_done),
+            daemon=True,
+            name="naa-localhost-run-log-drain",
+        ).start()
+
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                line = lines.get(timeout=0.5)
+            except queue.Empty:
+                if proc.poll() is not None:
+                    break
+                continue
+            public_url = _localhost_run_url(line)
+            if public_url:
+                startup_done.set()
+                return proc, public_url
+            if proc.poll() is not None and lines.empty():
+                break
+
+        startup_done.set()
+        return_code = proc.poll()
+        if return_code is None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+        _TUNNEL_LOGS.append(
+            f"localhost.run SSH attempt failed (exit={return_code}, timeout={timeout:g}s)."
+        )
+        return None, None
+
+    identity = _ensure_localhost_run_identity()
     if identity is not None:
-        command.extend([
+        identity_command = list(base_command)
+        identity_command.extend([
             "-o",
             "BatchMode=yes",
             "-o",
             "IdentitiesOnly=yes",
             "-i",
             str(identity),
+            "-R",
+            f"80:127.0.0.1:{port}",
+            "localhost.run",
         ])
-        destination = "localhost.run"
-    else:
-        # Remain usable on minimal images without ssh-keygen, but make it clear
-        # in the logs that a reconnect will receive a different public URL.
-        destination = "nokey@localhost.run"
-        _TUNNEL_LOGS.append(
-            "Using localhost.run without an SSH identity; reconnects will change the URL."
-        )
-    command.extend(["-R", f"80:127.0.0.1:{port}", destination])
-    proc = subprocess.Popen(
-        command,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-    )
-    lines: queue.Queue = queue.Queue()
-    startup_done = threading.Event()
-    threading.Thread(
-        target=_drain_output,
-        args=(proc, lines, startup_done),
-        daemon=True,
-        name="naa-localhost-run-log-drain",
-    ).start()
-
-    deadline = time.time() + 60
-    while time.time() < deadline:
-        if proc.poll() is not None:
-            break
-        try:
-            line = lines.get(timeout=0.5)
-        except queue.Empty:
-            continue
-        public_url = _localhost_run_url(line)
+        proc, public_url = launch(identity_command, timeout=20)
         if public_url:
-            startup_done.set()
             return proc, public_url
+        _TUNNEL_LOGS.append(
+            "SSH-identity tunnel failed; retrying with free anonymous localhost.run access."
+        )
 
-    startup_done.set()
-    try:
-        proc.terminate()
-    except Exception:
-        pass
-    return None, None
+    _TUNNEL_LOGS.append(
+        "Using anonymous localhost.run access; its URL can change after reconnecting."
+    )
+    anonymous_command = list(base_command)
+    anonymous_command.extend([
+        "-R",
+        f"80:127.0.0.1:{port}",
+        "nokey@localhost.run",
+    ])
+    return launch(anonymous_command, timeout=60)
 
 def cf_binary_path() -> Path:
     suffix = ".exe" if platform.system().lower() == "windows" else ""

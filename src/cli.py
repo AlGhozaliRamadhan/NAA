@@ -26,7 +26,7 @@ from src.config import (
     MODELS,
     settings,
 )
-from src.tunnel.cloudflare import start_tunnel, download_cloudflared
+from src.tunnel.cloudflare import start_tunnel, download_cloudflared, tunnel_log_tail
 from src.supervisor.watchdog import (
     start_keepalive,
     is_server_healthy,
@@ -795,6 +795,14 @@ def cmd_start(args: list = None):
                 "anonymous URL may change after a reconnect."
             )
     else:
+        err("Public HTTPS tunnel failed. The API is LOCAL ONLY inside this notebook.")
+        tunnel_lines = tunnel_log_tail(20)
+        if tunnel_lines:
+            print("\n--- LAST TUNNEL LOG OUTPUT ---")
+            for line in tunnel_lines:
+                print(f"  {line}")
+            print("------------------------------\n")
+        warn("Do not put http://localhost:8000 into OpenCode on another computer.")
         public_url = f"http://localhost:{PORT}"
 
     if public_url.startswith("http") and not public_url.startswith("http://localhost"):

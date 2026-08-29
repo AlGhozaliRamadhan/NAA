@@ -134,3 +134,35 @@ def test_localhost_run_uses_anonymous_ssh_tunnel(monkeypatch):
     assert str(identity) in captured[0]
     assert "80:127.0.0.1:8000" in captured[0]
     assert "ServerAliveInterval=30" in captured[0]
+
+
+def test_localhost_run_falls_back_to_nokey_when_identity_fails(monkeypatch):
+    captured = []
+    identity = cloudflare.Path("/tmp/test-naa-localhost-run-key")
+    monkeypatch.setenv("NAA_TUNNEL_PROVIDER", "localhost-run")
+    monkeypatch.setattr(cloudflare, "_ensure_localhost_run_identity", lambda: identity)
+
+    calls = 0
+
+    def fake_popen(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        captured.append(command)
+        if calls == 1:
+            failed = FakeProcess(command, ["Permission denied (publickey)\n"])
+            failed.alive = False
+            return failed
+        return FakeProcess(
+            command,
+            ["Connect to https://anonymous-example.lhr.life with tls termination\n"],
+        )
+
+    monkeypatch.setattr(cloudflare.subprocess, "Popen", fake_popen)
+
+    proc, url = cloudflare.start_tunnel(8000)
+
+    assert proc.poll() is None
+    assert url == "https://anonymous-example.lhr.life"
+    assert len(captured) == 2
+    assert captured[0][-1] == "localhost.run"
+    assert captured[1][-1] == "nokey@localhost.run"

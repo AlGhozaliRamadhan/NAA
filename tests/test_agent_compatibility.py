@@ -1,6 +1,8 @@
 """End-to-end wire compatibility tests for coding-agent tool loops."""
 
 import json
+import threading
+import time
 
 from fastapi.testclient import TestClient
 
@@ -61,6 +63,19 @@ def _sse_data(response_text):
         for line in response_text.splitlines()
         if line.startswith("data: ") and line != "data: [DONE]"
     ]
+
+
+def _finish_model_load(engine, delay=0.08):
+    def finish():
+        time.sleep(delay)
+        engine.model_loaded = True
+        engine.model_loading = False
+        engine.load_stage = "ready"
+        engine.ready_event.set()
+
+    thread = threading.Thread(target=finish, daemon=True)
+    thread.start()
+    return thread
 
 
 def test_openai_xml_tool_call_becomes_structured(
@@ -160,6 +175,35 @@ def test_openai_stream_converts_split_qwen_call(
         and chunk["choices"][0].get("finish_reason") == "tool_calls"
         for chunk in chunks
     )
+
+
+def test_openai_stream_waits_through_model_reload(
+    client: TestClient, user_headers, mock_engine, monkeypatch
+):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "sse_heartbeat_secs", 0.01)
+    monkeypatch.setattr(settings, "model_wait_timeout_secs", 1.0)
+    mock_engine.model_loaded = False
+    mock_engine.model_loading = True
+    mock_engine.load_stage = "loading"
+    mock_engine.ready_event.clear()
+    loader = _finish_model_load(mock_engine)
+
+    response = client.post(
+        "/v1/chat/completions",
+        headers=user_headers,
+        json={
+            "messages": [{"role": "user", "content": "Continue after reload"}],
+            "stream": True,
+        },
+    )
+    loader.join(timeout=1)
+
+    assert response.status_code == 200
+    assert ": model-loading" in response.text
+    assert "data: [DONE]" in response.text
+    assert '"finish_reason": "stop"' in response.text
 
 
 def test_openai_preserves_tool_result_history(
@@ -389,6 +433,37 @@ def test_anthropic_stream_emits_tool_events(
     assert '"stop_reason": "tool_use"' in response.text
     assert "event: message_stop" in response.text
     assert "<function=Glob>" not in response.text
+
+
+def test_anthropic_stream_waits_through_model_reload(
+    client: TestClient, user_headers, mock_engine, monkeypatch
+):
+    from src.config import settings
+
+    monkeypatch.setattr(settings, "sse_heartbeat_secs", 0.01)
+    monkeypatch.setattr(settings, "model_wait_timeout_secs", 1.0)
+    mock_engine.model_loaded = False
+    mock_engine.model_loading = True
+    mock_engine.load_stage = "loading"
+    mock_engine.ready_event.clear()
+    loader = _finish_model_load(mock_engine)
+
+    response = client.post(
+        "/v1/messages",
+        headers=user_headers,
+        json={
+            "model": "claude-naa",
+            "max_tokens": 64,
+            "stream": True,
+            "messages": [{"role": "user", "content": "Continue after reload"}],
+        },
+    )
+    loader.join(timeout=1)
+
+    assert response.status_code == 200
+    assert "event: message_start" in response.text
+    assert "event: ping" in response.text
+    assert "event: message_stop" in response.text
 
 
 def test_anthropic_tool_result_round_trip_and_optional_endpoints(

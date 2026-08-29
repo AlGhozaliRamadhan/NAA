@@ -54,6 +54,7 @@ from src.tunnel.cloudflare import (
 from src.supervisor.watchdog import (
     start_keepalive,
     is_server_healthy as _is_server_healthy,
+    is_server_loading as _is_server_loading,
     public_health_ok as _public_health_ok,
     wait_for_port,
 )

@@ -85,7 +85,7 @@ def test_502_prevention_startup_sequencing_and_watchdog(tmp_path: Path, monkeypa
     _state["model_loaded"] = True
 
     # Wait for the public smoke test to be recorded
-    deadline = time.time() + 10
+    deadline = time.time() + 20
     while time.time() < deadline:
         if any(c[0] == "public_health_ok" for c in calls):
             break

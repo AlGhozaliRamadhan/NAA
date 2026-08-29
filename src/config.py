@@ -172,6 +172,7 @@ class Settings:
     flash_attn: bool = os.environ.get("NAA_FLASH_ATTN", "1").lower() in ("1", "true", "yes")
     default_rpm: int = int(os.environ.get("NAA_RPM", os.environ.get("RATE_LIMIT_RPM", "30")))
     sse_heartbeat_secs: float = float(os.environ.get("NAA_SSE_HEARTBEAT", os.environ.get("SSE_HEARTBEAT_SECS", "5.0")))
+    model_wait_timeout_secs: float = float(os.environ.get("NAA_MODEL_WAIT_TIMEOUT", "600.0"))
     trust_remote_code: bool = os.environ.get("NAA_TRUST_REMOTE_CODE", "1").lower() in ("1", "true", "yes")
     port: int = PORT
     quiet: bool = QUIET

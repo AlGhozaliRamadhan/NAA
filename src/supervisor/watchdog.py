@@ -12,6 +12,16 @@ from typing import Optional, Any
 
 logger = logging.getLogger("naa-supervisor")
 
+
+def get_server_health(port: int) -> Optional[dict]:
+    try:
+        with urllib.request.urlopen(f"http://localhost:{port}/health", timeout=5) as r:
+            if r.status != 200:
+                return None
+            return json.loads(r.read())
+    except Exception:
+        return None
+
 def start_keepalive(port: int):
     def _loop():
         while True:
@@ -25,12 +35,18 @@ def start_keepalive(port: int):
     t.start()
 
 def is_server_healthy(port: int) -> bool:
-    try:
-        with urllib.request.urlopen(f"http://localhost:{port}/health", timeout=5) as r:
-            data = json.loads(r.read())
-            return bool(data.get("model_loaded"))
-    except Exception:
+    data = get_server_health(port)
+    return bool(data and data.get("model_loaded"))
+
+
+def is_server_loading(port: int) -> bool:
+    data = get_server_health(port)
+    if not data or data.get("load_error"):
         return False
+    return bool(
+        data.get("model_loading")
+        or data.get("load_stage") == "loading"
+    )
 
 def public_health_ok(url: str, timeout: float = 10.0) -> bool:
     deadline = time.time() + timeout
@@ -38,9 +54,12 @@ def public_health_ok(url: str, timeout: float = 10.0) -> bool:
         try:
             with urllib.request.urlopen(f"{url}/health", timeout=3) as r:
                 if r.status == 200:
-                    return True
+                    data = json.loads(r.read())
+                    if data.get("model_loaded"):
+                        return True
         except Exception:
-            time.sleep(1)
+            pass
+        time.sleep(1)
     return False
 
 def wait_for_port(port: int, timeout: float = 180.0, proc: Optional[Any] = None) -> bool:

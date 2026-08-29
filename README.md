@@ -270,6 +270,8 @@ Use a model trained for tool calling. The bridge can translate a correct native 
 
 Coding agents send large system prompts and tool schemas. The default context is 8,192 tokens; set `NAA_CTX=32768` (or another value supported by the model and available KV-cache memory) before `naa.py start` for longer agent sessions, then make the client `limit.context` match it.
 
+Agent clients normally use streaming requests. If the server process restarts, NAA now opens the OpenAI or Anthropic SSE stream immediately and sends protocol keepalives while the model reloads instead of returning a hard 503. The watchdog also recognizes model loading as progress and will not restart a healthy loader. The default reload wait is 600 seconds and can be changed with `NAA_MODEL_WAIT_TIMEOUT`; non-streaming requests still receive a normal `503` with `Retry-After: 5` until the model is ready.
+
 ### OpenCode
 
 Create `opencode.json` in the project using NAA's `/v1` base URL. Replace the model key with the active ID returned by `GET /v1/models` if it differs:
@@ -416,6 +418,7 @@ curl "https://YOUR-URL.trycloudflare.com/v1/admin/stats" \
 | `NAA_PORT` / `PORT` | `8000` | Local port for FastAPI server |
 | `NAA_RPM` | `30` | Default rate limit in requests per minute per key |
 | `NAA_SSE_HEARTBEAT` | `5.0` | Interval in seconds for SSE streaming keepalive comments |
+| `NAA_MODEL_WAIT_TIMEOUT` | `600.0` | Maximum seconds an agent SSE request waits for a reloading model while receiving keepalives |
 
 ---
 

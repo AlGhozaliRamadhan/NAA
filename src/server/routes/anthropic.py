@@ -24,6 +24,9 @@ from src.server.routes.chat import (
     _generation_kwargs,
     _raw_to_message,
     _recover_missing_tool_call,
+    _engine_is_loading,
+    _stream_engine_readiness,
+    EngineUnavailableError,
     ensure_engine_ready,
 )
 from src.server.schemas import AnthropicMessageRequest, ChatCompletionRequest
@@ -263,7 +266,8 @@ async def create_anthropic_message(
 ):
     engine = request.app.state.engine
     km = request.app.state.key_manager
-    ensure_engine_ready(engine)
+    if not body.stream or not _engine_is_loading(engine):
+        ensure_engine_ready(engine)
     compat = _compat_body(body)
     message_id = f"msg_{uuid.uuid4().hex}"
 
@@ -272,9 +276,7 @@ async def create_anthropic_message(
 
         async def stream_generator():
             queue: asyncio.Queue = asyncio.Queue()
-            producer = asyncio.create_task(
-                _collect_stream(engine, _generation_kwargs(compat), cancel_event, queue)
-            )
+            producer: Optional[asyncio.Task] = None
             estimated_input = max(
                 1,
                 len(json.dumps(body.messages, ensure_ascii=False)) // 4,
@@ -307,6 +309,14 @@ async def create_anthropic_message(
                 else None
             )
             try:
+                async for _ in _stream_engine_readiness(engine, request):
+                    yield _sse("ping", {"type": "ping"})
+                if not engine.is_ready():
+                    return
+
+                producer = asyncio.create_task(
+                    _collect_stream(engine, _generation_kwargs(compat), cancel_event, queue)
+                )
                 while True:
                     if await request.is_disconnected():
                         cancel_event.set()
@@ -517,12 +527,19 @@ async def create_anthropic_message(
                     "error",
                     {
                         "type": "error",
-                        "error": {"type": "api_error", "message": str(exc)},
+                        "error": {
+                            "type": (
+                                "overloaded_error"
+                                if isinstance(exc, EngineUnavailableError)
+                                else "api_error"
+                            ),
+                            "message": str(exc),
+                        },
                     },
                 )
             finally:
                 cancel_event.set()
-                if not producer.done():
+                if producer is not None and not producer.done():
                     producer.cancel()
 
         response = StreamingResponse(stream_generator(), media_type="text/event-stream")

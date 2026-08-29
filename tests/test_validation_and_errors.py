@@ -44,6 +44,7 @@ def test_model_not_ready_returns_503(client: TestClient, user_headers, mock_engi
         "messages": [{"role": "user", "content": "hello"}]
     })
     assert res.status_code == 503
+    assert res.headers["retry-after"] == "5"
     data = res.json()
     assert "error" in data
     assert data["error"]["code"] == 503

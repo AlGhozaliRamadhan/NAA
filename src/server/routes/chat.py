@@ -7,7 +7,7 @@ import json
 import logging
 import time
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncGenerator, Dict, List, Optional, Tuple
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
@@ -28,16 +28,60 @@ logger = logging.getLogger("naa-chat")
 router = APIRouter(prefix="/v1", tags=["Chat"])
 
 
+class EngineUnavailableError(RuntimeError):
+    """A model load failed or did not finish within the allowed wait."""
+
+
+def _engine_is_loading(engine: Any) -> bool:
+    return bool(
+        getattr(engine, "model_loading", False)
+        or getattr(engine, "load_stage", "") == "loading"
+    )
+
+
 def ensure_engine_ready(engine: Any) -> None:
     if not engine.is_ready():
+        load_error = getattr(engine, "load_error", None)
+        if load_error:
+            detail = f"Model failed to load: {load_error}"
+        elif _engine_is_loading(engine):
+            detail = "Model is loading. Please retry in a few moments."
+        else:
+            detail = "Model is not loaded."
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=(
-                "Model is loading. Please retry in a few moments."
-                if engine.model_loading
-                else "Model is not loaded."
-            ),
+            detail=detail,
+            headers={"Retry-After": "5"},
         )
+
+
+async def _stream_engine_readiness(
+    engine: Any,
+    request: Request,
+) -> AsyncGenerator[None, None]:
+    """Keep an SSE response alive while a restarted model loads."""
+
+    timeout = max(0.1, float(settings.model_wait_timeout_secs))
+    heartbeat = max(0.05, float(settings.sse_heartbeat_secs))
+    deadline = time.monotonic() + timeout
+
+    while not engine.is_ready():
+        if await request.is_disconnected():
+            return
+        load_error = getattr(engine, "load_error", None)
+        if load_error:
+            raise EngineUnavailableError(f"Model failed to load: {load_error}")
+        if not _engine_is_loading(engine):
+            raise EngineUnavailableError("Model is not loaded.")
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise EngineUnavailableError(
+                f"Model did not finish loading within {timeout:g} seconds."
+            )
+        await asyncio.sleep(min(heartbeat, remaining))
+        if not engine.is_ready():
+            yield None
 
 
 def _message_dicts(body: ChatCompletionRequest) -> List[Dict[str, Any]]:
@@ -196,7 +240,8 @@ async def chat_completions(
 ):
     engine = request.app.state.engine
     km = request.app.state.key_manager
-    ensure_engine_ready(engine)
+    if not body.stream or not _engine_is_loading(engine):
+        ensure_engine_ready(engine)
 
     request_id = f"chatcmpl-{uuid.uuid4().hex}"
     created_ts = int(time.time())
@@ -212,9 +257,7 @@ async def chat_completions(
         async def stream_generator():
             completion_units = 0
             queue: asyncio.Queue = asyncio.Queue()
-            producer = asyncio.create_task(
-                _collect_stream(engine, _generation_kwargs(body), cancel_event, queue)
-            )
+            producer: Optional[asyncio.Task] = None
 
             initial = {
                 "id": request_id,
@@ -243,6 +286,14 @@ async def chat_completions(
                 else None
             )
             try:
+                async for _ in _stream_engine_readiness(engine, request):
+                    yield ": model-loading\n\n"
+                if not engine.is_ready():
+                    return
+
+                producer = asyncio.create_task(
+                    _collect_stream(engine, _generation_kwargs(body), cancel_event, queue)
+                )
                 while True:
                     if await request.is_disconnected():
                         cancel_event.set()
@@ -424,19 +475,20 @@ async def chat_completions(
                 yield "data: [DONE]\n\n"
             except Exception as exc:
                 logger.error("Streaming error in chat: %s", exc, exc_info=True)
+                error_code = 503 if isinstance(exc, EngineUnavailableError) else 500
                 error = {
                     "error": {
                         "message": str(exc),
                         "type": "server_error",
                         "param": None,
-                        "code": 500,
+                        "code": error_code,
                     }
                 }
                 yield f"data: {json.dumps(error)}\n\n"
                 yield "data: [DONE]\n\n"
             finally:
                 cancel_event.set()
-                if not producer.done():
+                if producer is not None and not producer.done():
                     producer.cancel()
                 km.record_usage(kd["key"], completion_units)
 

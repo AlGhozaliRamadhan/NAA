@@ -30,6 +30,7 @@ from src.tunnel.cloudflare import start_tunnel, download_cloudflared
 from src.supervisor.watchdog import (
     start_keepalive,
     is_server_healthy,
+    is_server_loading,
     public_health_ok,
     wait_for_port,
 )
@@ -535,6 +536,7 @@ def cmd_start(args: list = None):
     start_tunnel_fn = _get_attr("start_tunnel", start_tunnel)
     start_keepalive_fn = _get_attr("start_keepalive", start_keepalive)
     is_server_healthy_fn = _get_attr("_is_server_healthy", is_server_healthy)
+    is_server_loading_fn = _get_attr("_is_server_loading", is_server_loading)
     public_health_ok_fn = _get_attr("_public_health_ok", public_health_ok)
     ensure_gguf_deps_fn = _get_attr("ensure_gguf_deps", ensure_gguf_deps)
 
@@ -763,6 +765,11 @@ def cmd_start(args: list = None):
                     proc_restart_attempts = 0
 
             if is_server_healthy_fn(PORT):
+                health_miss_streak = 0
+            elif is_server_loading_fn(PORT):
+                # A cold model load can take several minutes.  Treat an alive
+                # origin that reports "loading" as progress, not as a crash,
+                # or the 90-second miss streak becomes an endless restart loop.
                 health_miss_streak = 0
             else:
                 health_miss_streak += 1

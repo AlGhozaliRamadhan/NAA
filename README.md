@@ -90,10 +90,12 @@ import os
 os.environ["NAA_CTX"] = "8192"
 os.environ["NAA_MAX_TOKENS"] = "4096"
 os.environ["NAA_FLASH_ATTN"] = "0"
-os.environ["NAA_N_GPU_LAYERS"] = "48"
+os.environ["NAA_N_GPU_LAYERS"] = "40"
 os.environ["NAA_MODEL_WAIT_TIMEOUT"] = "600"
 os.environ["NAA_TUNNEL_PROVIDER"] = "localhost-run"
-os.environ["NAA_FORCE_LLAMA_CPP_REBUILD"] = "1"  # One build per notebook runtime/GPU
+# Use NAA's prebuilt CUDA wheel first.  Do not force a source build unless a
+# diagnosed native CUDA error specifically requires it.
+os.environ.pop("NAA_FORCE_LLAMA_CPP_REBUILD", None)
 
 !pip install -q -r requirements.txt
 !python naa.py start --model "https://huggingface.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED/blob/main/Qwen3.8-27B-OBLITERATED-Q3_K_M.gguf"

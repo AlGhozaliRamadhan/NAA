@@ -542,10 +542,13 @@ async def create_anthropic_message(
                 if producer is not None and not producer.done():
                     producer.cancel()
 
-        response = StreamingResponse(stream_generator(), media_type="text/event-stream")
-        response.headers["Connection"] = "close"
+        response = StreamingResponse(
+            stream_generator(),
+            media_type="text/event-stream; charset=utf-8",
+        )
+        response.headers["Connection"] = "keep-alive"
         response.headers["X-Accel-Buffering"] = "no"
-        response.headers["Cache-Control"] = "no-cache"
+        response.headers["Cache-Control"] = "no-cache, no-transform"
         return response
 
     raw_res = await engine.generate_chat_non_streaming(**_generation_kwargs(compat))

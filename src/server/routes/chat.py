@@ -493,10 +493,13 @@ async def chat_completions(
                     producer.cancel()
                 km.record_usage(kd["key"], completion_units)
 
-        response = StreamingResponse(stream_generator(), media_type="text/event-stream")
-        response.headers["Connection"] = "close"
+        response = StreamingResponse(
+            stream_generator(),
+            media_type="text/event-stream; charset=utf-8",
+        )
+        response.headers["Connection"] = "keep-alive"
         response.headers["X-Accel-Buffering"] = "no"
-        response.headers["Cache-Control"] = "no-cache"
+        response.headers["Cache-Control"] = "no-cache, no-transform"
         return response
 
     raw_res = await engine.generate_chat_non_streaming(**_generation_kwargs(body))

@@ -417,11 +417,56 @@ def _parse_xml_function(text: str, names: Dict[str, str]) -> List[Tuple[str, Dic
                     arguments = jargs
             except Exception:
                 pass
+        arguments = _normalize_tool_arguments(name, arguments, body)
         calls.append((name, arguments))
     return calls
 
 
+def _normalize_tool_arguments(
+    tool_name: str, arguments: Dict[str, Any], raw_body: str = ""
+) -> Dict[str, Any]:
+    """Ensure tool arguments match expected schema fields like 'command' for Bash."""
+    name_lower = tool_name.lower()
+    norm = dict(arguments) if isinstance(arguments, dict) else {}
+
+    # 1. Recover argument from raw body if arguments is empty
+    if not norm and raw_body and raw_body.strip():
+        clean_text = raw_body.strip()
+        clean_text = re.sub(
+            r"</?(?:parameter|function|tool_call)\b[^>]*>", "", clean_text, flags=re.IGNORECASE
+        ).strip()
+        if clean_text:
+            if name_lower in ("bash", "sh", "terminal", "execute_command", "run_command", "exec"):
+                norm = {"command": clean_text}
+            elif name_lower in ("read_file", "view_file", "view", "open_file"):
+                norm = {"file_path": clean_text}
+            elif name_lower in ("write_file", "edit_file", "create_file"):
+                norm = {"content": clean_text}
+            else:
+                norm = {"input": clean_text}
+
+    # 2. Normalize Bash parameter aliases (cmd, code, script, etc.) -> command
+    if name_lower in ("bash", "sh", "terminal", "execute_command", "run_command", "exec"):
+        if "command" not in norm:
+            for alias in ("cmd", "code", "script", "input", "value", "raw", "exec", "command_line", "text"):
+                if alias in norm:
+                    norm["command"] = norm.pop(alias)
+                    break
+        # Fix unescaped Windows drive paths in bash commands (e.g., D:\Project -> D:/Project)
+        if "command" in norm and isinstance(norm["command"], str):
+            cmd = norm["command"]
+            cmd = re.sub(
+                r'([A-Za-z]):\\([A-Za-z0-9_.\-\\]+)',
+                lambda m: m.group(1) + ':/' + m.group(2).replace('\\', '/'),
+                cmd,
+            )
+            norm["command"] = cmd
+
+    return norm
+
+
 def _structured_call(name: str, arguments: Dict[str, Any], index: int) -> Dict[str, Any]:
+    arguments = _normalize_tool_arguments(name, arguments)
     return {
         "id": f"call_{uuid.uuid4().hex[:24]}",
         "type": "function",
@@ -508,11 +553,18 @@ def normalize_openai_message(
             call.setdefault("id", f"call_{uuid.uuid4().hex[:24]}")
             call.setdefault("type", "function")
             function = call.setdefault("function", {})
-            arguments = function.get("arguments", {})
-            if not isinstance(arguments, str):
-                function["arguments"] = json.dumps(
-                    arguments, ensure_ascii=False, separators=(",", ":")
-                )
+            func_name = function.get("name", "")
+            raw_args = function.get("arguments", {})
+            if isinstance(raw_args, str):
+                try:
+                    raw_args = json.loads(raw_args)
+                except Exception:
+                    raw_args = {"raw": raw_args}
+            if isinstance(raw_args, dict):
+                raw_args = _normalize_tool_arguments(func_name, raw_args)
+            function["arguments"] = json.dumps(
+                raw_args, ensure_ascii=False, separators=(",", ":")
+            )
         normalized["content"] = normalized.get("content") or None
         return normalized, "tool_calls"
 

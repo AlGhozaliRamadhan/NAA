@@ -26,7 +26,7 @@ from src.config import (
     MODELS,
     settings,
 )
-from src.tunnel.cloudflare import start_tunnel, download_cloudflared, tunnel_log_tail
+from src.tunnel import start_tunnel, download_cloudflared, tunnel_log_tail
 from src.supervisor.watchdog import (
     start_keepalive,
     is_server_healthy,
@@ -1073,6 +1073,8 @@ def cmd_start(args: list = None):
                 "localhost.run is free and supports the agent stream, but its "
                 "anonymous URL may change after a reconnect."
             )
+        elif "ngrok" in public_url:
+            ok("Ngrok tunnel active (full SSE streaming & agentic support).")
     else:
         err("Public HTTPS tunnel failed. The API is LOCAL ONLY inside this notebook.")
         tunnel_lines = tunnel_log_tail(20)

@@ -461,7 +461,8 @@ curl "https://YOUR-URL.trycloudflare.com/v1/admin/stats" \
 | `NAA_RPM` | `30` | Default rate limit in requests per minute per key |
 | `NAA_SSE_HEARTBEAT` | `5.0` | Interval in seconds for SSE streaming keepalive comments |
 | `NAA_MODEL_WAIT_TIMEOUT` | `600.0` | Maximum seconds an agent SSE request waits for a reloading model while receiving keepalives |
-| `NAA_TUNNEL_PROVIDER` | `cloudflare` | Tunnel transport: `cloudflare`, `localhost-run` (free/no signup), or `none` |
+| `NAA_TUNNEL_PROVIDER` | `cloudflare` | Tunnel transport: `cloudflare`, `ngrok` (supports agent SSE stream), `localhost-run` (free/no signup), or `none` |
+| `NAA_NGROK_AUTHTOKEN` | None | Authtoken for ngrok tunnel (`NAA_TUNNEL_PROVIDER="ngrok"`) |
 | `NAA_SSH_IDENTITY_FILE` | Runtime temporary file | Dedicated SSH key used to retain a localhost.run hostname across reconnects |
 | `NAA_CF_TUNNEL_TOKEN` | None | Token for a remotely-managed Cloudflare Tunnel; required for reliable SSE agent traffic |
 | `NAA_PUBLIC_URL` | None | Stable HTTPS hostname configured for the remotely-managed tunnel, such as `https://naa.example.com` |

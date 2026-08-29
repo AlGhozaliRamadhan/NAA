@@ -133,7 +133,7 @@ def test_localhost_run_uses_anonymous_ssh_tunnel(monkeypatch):
     assert "localhost.run" == captured[0][-1]
     assert str(identity) in captured[0]
     assert "80:127.0.0.1:8000" in captured[0]
-    assert "ServerAliveInterval=30" in captured[0]
+    assert "ServerAliveInterval=15" in captured[0]
 
 
 def test_localhost_run_falls_back_to_nokey_when_identity_fails(monkeypatch):

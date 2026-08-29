@@ -15,12 +15,10 @@ from fastapi.responses import StreamingResponse
 from src.config import settings
 from src.core.tool_calls import (
     TOOL_RECOVERY_PROMPT,
-    ThinkTagFilter,
     ToolTextStreamBuffer,
     build_tool_system_prompt,
     looks_like_abandoned_tool_intent,
     normalize_openai_message,
-    strip_think_tags,
     tool_choice_requires_call,
 )
 from src.server.auth import get_api_key
@@ -280,7 +278,6 @@ async def chat_completions(
             emitted_text_parts: List[str] = []
             native_calls: Dict[int, Dict[str, Any]] = {}
             raw_finish: Optional[str] = None
-            think_filter = ThinkTagFilter()
             text_buffer = (
                 ToolTextStreamBuffer(
                     hold_all=tool_choice_requires_call(_tool_choice(body))
@@ -321,9 +318,7 @@ async def chat_completions(
                     content = delta.get("content")
                     if content:
                         content_parts.append(content)
-                        # Strip <think> blocks before any further processing.
-                        visible = think_filter.feed(content)
-                        safe_text = text_buffer.feed(visible) if text_buffer else visible
+                        safe_text = text_buffer.feed(content) if text_buffer else content
                         if safe_text:
                             emitted_text_parts.append(safe_text)
                             live_payload = {
@@ -365,13 +360,9 @@ async def chat_completions(
                 if cancel_event.is_set():
                     return
 
-                # Flush any boundary-buffered content from both filters.
-                think_tail = think_filter.finish()
-                if think_tail:
-                    think_tail = text_buffer.feed(think_tail) if text_buffer else think_tail
                 tail = (text_buffer.finish() if text_buffer else "") or ""
-                for flush_chunk in filter(None, [think_tail, tail]):
-                    emitted_text_parts.append(flush_chunk)
+                if tail:
+                    emitted_text_parts.append(tail)
                     live_payload = {
                         "id": request_id,
                         "object": "chat.completion.chunk",
@@ -380,20 +371,17 @@ async def chat_completions(
                         "choices": [
                             {
                                 "index": 0,
-                                "delta": {"content": flush_chunk},
+                                "delta": {"content": tail},
                                 "finish_reason": None,
                             }
                         ],
                     }
                     yield f"data: {json.dumps(live_payload)}\n\n"
 
-                # Strip think tags from the assembled message so the
-                # remaining_text calculation stays consistent with what was
-                # actually emitted.
                 raw_content = "".join(content_parts)
                 message: Dict[str, Any] = {
                     "role": "assistant",
-                    "content": strip_think_tags(raw_content),
+                    "content": raw_content,
                 }
                 if native_calls:
                     message["tool_calls"] = [native_calls[i] for i in sorted(native_calls)]
@@ -516,9 +504,6 @@ async def chat_completions(
     message, finish_reason, usage = await _recover_missing_tool_call(
         engine, body, message, finish_reason, usage
     )
-    # Strip <think> blocks — OpenAI-format clients have no reasoning field.
-    if isinstance(message.get("content"), str):
-        message["content"] = strip_think_tags(message["content"])
 
     total_tokens = usage.get(
         "total_tokens",

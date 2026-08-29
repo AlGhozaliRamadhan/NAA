@@ -1,6 +1,4 @@
-"""
-Cloudflare Quick Tunnel Management
-"""
+"""Cloudflare and localhost.run tunnel management."""
 
 import os
 import queue
@@ -9,6 +7,7 @@ import time
 import platform
 import subprocess
 import threading
+import tempfile
 import urllib.request
 from collections import deque
 from pathlib import Path
@@ -71,6 +70,49 @@ def _localhost_run_url(line: str) -> Optional[str]:
     return None
 
 
+def _ensure_localhost_run_identity() -> Optional[Path]:
+    """Create a dedicated key so free reconnects can retain their hostname."""
+
+    configured = os.environ.get("NAA_SSH_IDENTITY_FILE", "").strip()
+    if configured:
+        identity = Path(configured).expanduser()
+    else:
+        # Keep the key for the lifetime of the notebook runtime.  localhost.run
+        # maps free tunnels to SSH identities, whereas the `nokey` account gets
+        # a fresh hostname whenever the connection is recreated.
+        runtime_dir = Path("/content") if Path("/content").is_dir() else Path(tempfile.gettempdir())
+        identity = runtime_dir / ".naa_localhost_run_ed25519"
+
+    if identity.exists() and identity.with_suffix(identity.suffix + ".pub").exists():
+        return identity
+
+    try:
+        identity.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            [
+                os.environ.get("NAA_SSH_KEYGEN_BINARY", "ssh-keygen"),
+                "-q",
+                "-t",
+                "ed25519",
+                "-N",
+                "",
+                "-f",
+                str(identity),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        if result.returncode == 0 and identity.exists():
+            return identity
+        detail = (result.stderr or result.stdout or "unknown ssh-keygen error").strip()
+        _TUNNEL_LOGS.append(f"Could not create localhost.run SSH identity: {detail}")
+    except Exception as exc:
+        _TUNNEL_LOGS.append(f"Could not create localhost.run SSH identity: {exc}")
+    return None
+
+
 def _start_localhost_run_tunnel(
     port: int,
 ) -> Tuple[Optional[subprocess.Popen], Optional[str]]:
@@ -81,6 +123,7 @@ def _start_localhost_run_tunnel(
         "NAA_SSH_KNOWN_HOSTS",
         "/tmp/naa_localhost_run_known_hosts",
     )
+    identity = _ensure_localhost_run_identity()
     command = [
         ssh_binary,
         "-T",
@@ -94,10 +137,25 @@ def _start_localhost_run_tunnel(
         "ServerAliveCountMax=3",
         "-o",
         "ExitOnForwardFailure=yes",
-        "-R",
-        f"80:localhost:{port}",
-        "nokey@localhost.run",
     ]
+    if identity is not None:
+        command.extend([
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "IdentitiesOnly=yes",
+            "-i",
+            str(identity),
+        ])
+        destination = "localhost.run"
+    else:
+        # Remain usable on minimal images without ssh-keygen, but make it clear
+        # in the logs that a reconnect will receive a different public URL.
+        destination = "nokey@localhost.run"
+        _TUNNEL_LOGS.append(
+            "Using localhost.run without an SSH identity; reconnects will change the URL."
+        )
+    command.extend(["-R", f"80:127.0.0.1:{port}", destination])
     proc = subprocess.Popen(
         command,
         stdout=subprocess.PIPE,

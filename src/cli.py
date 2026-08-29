@@ -446,6 +446,79 @@ def start_server(
     wait_fn = _get_attr("wait_for_port", wait_for_port)
     return wait_fn(PORT, timeout=180, proc=proc)
 
+
+def _server_log_tail(limit: int = 30) -> list[str]:
+    """Read a bounded diagnostic tail from the child server log."""
+
+    try:
+        if Path(SERVER_LOG).exists():
+            return Path(SERVER_LOG).read_text(
+                encoding="utf-8",
+                errors="replace",
+            ).strip().splitlines()[-max(1, limit):]
+    except Exception:
+        pass
+    return []
+
+
+def _print_server_log_tail(limit: int = 30) -> None:
+    lines = _server_log_tail(limit)
+    if not lines:
+        return
+    print("\n--- LAST SERVER LOG OUTPUT ---")
+    for line in lines:
+        print(f"  {line}")
+    print("------------------------------\n")
+
+
+def _apply_gguf_memory_recovery(model_path: Path, attempt: int) -> bool:
+    """Stage a safer llama.cpp profile after a hard GGUF server crash."""
+
+    enabled = os.environ.get("NAA_AUTO_MEMORY_RECOVERY", "1").lower() in (
+        "1", "true", "yes",
+    )
+    if not enabled or Path(model_path).suffix.lower() != ".gguf":
+        return False
+
+    changes = []
+    try:
+        context = int(os.environ.get("NAA_CTX", str(settings.max_context)))
+    except ValueError:
+        context = settings.max_context
+    if context > 8192:
+        os.environ["NAA_CTX"] = "8192"
+        changes.append(f"context {context}->8192")
+
+    for key in ("NAA_CACHE_TYPE_K", "NAA_CACHE_TYPE_V"):
+        if not os.environ.get(key):
+            os.environ[key] = "q8_0"
+            changes.append(f"{key}=q8_0")
+
+    try:
+        gpu_layers = int(
+            os.environ.get("NAA_N_GPU_LAYERS", str(settings.n_gpu_layers))
+        )
+    except ValueError:
+        gpu_layers = settings.n_gpu_layers
+
+    # A 13+ GB GGUF with every layer offloaded leaves too little space for
+    # context and compute buffers on a 15 GB T4.  Each subsequent hard crash
+    # moves another eight layers to system RAM.
+    if gpu_layers < 0:
+        safer_layers = 48
+    elif attempt > 1 and gpu_layers > 16:
+        safer_layers = max(16, gpu_layers - 8)
+    else:
+        safer_layers = gpu_layers
+    if safer_layers != gpu_layers:
+        os.environ["NAA_N_GPU_LAYERS"] = str(safer_layers)
+        changes.append(f"GPU layers {gpu_layers}->{safer_layers}")
+
+    if changes:
+        warn("Applying GGUF memory recovery: " + ", ".join(changes))
+        return True
+    return False
+
 def api_call(method: str, path: str, admin_key: str, data: Dict[str, Any] = None) -> Optional[Dict[str, Any]]:
     url = f"http://localhost:{PORT}{path}"
     req = urllib.request.Request(url, method=method.upper())
@@ -592,6 +665,8 @@ def cmd_start(args: list = None):
     started = start_server_fn(model_path, admin_key, model_cfg, preset=preset_arg, system_prompt=system_prompt_arg)
     if not started:
         warn("Retrying server start...")
+        _print_server_log_tail(30)
+        _apply_gguf_memory_recovery(model_path, 1)
         time.sleep(3)
         started = start_server_fn(model_path, admin_key, model_cfg, preset=preset_arg, system_prompt=system_prompt_arg)
     
@@ -599,13 +674,7 @@ def cmd_start(args: list = None):
         ok(f"Server listening on port {PORT}")
     else:
         err("Server failed to start.")
-        if Path(SERVER_LOG).exists():
-            log_tail = Path(SERVER_LOG).read_text(encoding="utf-8", errors="replace").strip().splitlines()[-20:]
-            if log_tail:
-                print("\n--- LAST SERVER LOG OUTPUT ---")
-                for l in log_tail:
-                    print(f"  {l}")
-                print("------------------------------\n")
+        _print_server_log_tail(60)
         return
 
     start_keepalive_fn(PORT)
@@ -627,13 +696,7 @@ def cmd_start(args: list = None):
             sys.stdout.write("\033[0m\n")
             sys.stdout.flush()
             err(f"Server process exited unexpectedly (code {current_server_proc.returncode}).")
-            if Path(SERVER_LOG).exists():
-                log_tail = Path(SERVER_LOG).read_text(encoding="utf-8", errors="replace").strip().splitlines()[-20:]
-                if log_tail:
-                    print("\n--- LAST SERVER LOG OUTPUT ---")
-                    for l in log_tail:
-                        print(f"  {l}")
-                    print("------------------------------\n")
+            _print_server_log_tail(30)
             return
 
         # Check health using is_server_healthy_fn
@@ -705,7 +768,7 @@ def cmd_start(args: list = None):
         err("Model loading timed out after 600s.")
         return
 
-    step(3, "Starting Cloudflare Quick Tunnel...")
+    step(3, "Starting public HTTPS tunnel...")
     public_url = None
     for _ in range(3):
         proc, candidate = start_tunnel_fn(PORT)
@@ -735,11 +798,11 @@ def cmd_start(args: list = None):
         public_url = f"http://localhost:{PORT}"
 
     if public_url.startswith("http") and not public_url.startswith("http://localhost"):
-        step(4, "Smoke-testing public URL through Cloudflare...")
+        step(4, "Smoke-testing public tunnel URL...")
         if public_health_ok_fn(public_url, timeout=15):
-            ok("Public URL is reachable through Cloudflare.")
+            ok("Public URL is reachable through the tunnel.")
         else:
-            warn("Public URL not yet reachable through Cloudflare.")
+            warn("Public URL is not yet reachable through the tunnel.")
 
     docs_url = f"{public_url}/docs"
     api_base = f"{public_url}/v1"
@@ -763,19 +826,38 @@ def cmd_start(args: list = None):
             
             server_alive = current_server_proc is not None and current_server_proc.poll() is None
             if not server_alive:
-                warn("Server died! Restarting...")
+                return_code = getattr(current_server_proc, "returncode", None)
+                warn(f"Server died (exit code {return_code})! Restarting...")
+                _print_server_log_tail(40)
                 if current_server_proc:
                     try:
                         current_server_proc.terminate()
                         current_server_proc.wait(timeout=5)
                     except Exception: pass
                 proc_restart_attempts += 1
+                _apply_gguf_memory_recovery(model_path, proc_restart_attempts)
+                if proc_restart_attempts > 5:
+                    err("Server crashed repeatedly; stopping instead of hiding an endless restart loop.")
+                    current_tunnel_proc = _get_attr("_tunnel_proc", _tunnel_proc)
+                    if current_tunnel_proc:
+                        try: current_tunnel_proc.terminate()
+                        except Exception: pass
+                    _print_server_log_tail(80)
+                    return
                 time.sleep(min(30, 2 ** proc_restart_attempts))
-                if start_server_fn(model_path, admin_key, model_cfg, preset=preset_arg, system_prompt=system_prompt_arg):
-                    proc_restart_attempts = 0
+                start_server_fn(
+                    model_path,
+                    admin_key,
+                    model_cfg,
+                    preset=preset_arg,
+                    system_prompt=system_prompt_arg,
+                )
 
             if is_server_healthy_fn(PORT):
                 health_miss_streak = 0
+                if proc_restart_attempts:
+                    ok("Server recovered and the model is ready again.")
+                    proc_restart_attempts = 0
             elif is_server_loading_fn(PORT):
                 # A cold model load can take several minutes.  Treat an alive
                 # origin that reports "loading" as progress, not as a crash,
@@ -785,13 +867,22 @@ def cmd_start(args: list = None):
                 health_miss_streak += 1
                 if health_miss_streak >= 3:
                     warn("Sustained health failure — restarting server.")
+                    proc_restart_attempts += 1
+                    _print_server_log_tail(40)
+                    _apply_gguf_memory_recovery(model_path, proc_restart_attempts)
                     if current_server_proc:
                         try:
                             current_server_proc.terminate()
                             current_server_proc.wait(5)
                         except Exception: pass
-                    if start_server_fn(model_path, admin_key, model_cfg, preset=preset_arg, system_prompt=system_prompt_arg):
-                        health_miss_streak = 0
+                    start_server_fn(
+                        model_path,
+                        admin_key,
+                        model_cfg,
+                        preset=preset_arg,
+                        system_prompt=system_prompt_arg,
+                    )
+                    health_miss_streak = 0
 
             current_tunnel_proc = _get_attr("_tunnel_proc", _tunnel_proc)
             tunnel_alive = current_tunnel_proc is not None and current_tunnel_proc.poll() is None
@@ -799,16 +890,21 @@ def cmd_start(args: list = None):
                 warn("Tunnel died! Restarting...")
                 proc, new_url = start_tunnel_fn(PORT)
                 if new_url:
+                    previous_url = public_url
+                    public_url = new_url
                     _tunnel_proc = proc
                     mod = sys.modules.get("naa")
                     if mod:
                         setattr(mod, "_tunnel_proc", proc)
                     save_state_fn({"public_url": new_url})
                     ok(f"Tunnel restarted: {new_url}")
-                    if "trycloudflare.com" in new_url:
+                    if new_url == previous_url:
+                        ok("The public API URL stayed the same.")
+                    elif "trycloudflare.com" in new_url:
                         warn("Quick Tunnel restart changed the public URL; update the client.")
                     elif "lhr.life" in new_url or "localhost.run" in new_url:
-                        warn("Free tunnel reconnected; update the client if its URL changed.")
+                        warn(f"Free tunnel URL changed. Update the client API base to: {new_url}/v1")
+                        info(f"Admin key is unchanged: {admin_key}")
     except KeyboardInterrupt:
         info("Shutting down NAA...")
         current_server_proc = _get_attr("_server_proc", _server_proc)

@@ -111,9 +111,11 @@ def test_named_tunnel_requires_public_url(monkeypatch):
 
 def test_localhost_run_uses_anonymous_ssh_tunnel(monkeypatch):
     captured = []
+    identity = cloudflare.Path("/tmp/test-naa-localhost-run-key")
     monkeypatch.setenv("NAA_TUNNEL_PROVIDER", "localhost-run")
     monkeypatch.delenv("NAA_CF_TUNNEL_TOKEN", raising=False)
     monkeypatch.delenv("NAA_PUBLIC_URL", raising=False)
+    monkeypatch.setattr(cloudflare, "_ensure_localhost_run_identity", lambda: identity)
     monkeypatch.setattr(
         cloudflare.subprocess,
         "Popen",
@@ -128,6 +130,7 @@ def test_localhost_run_uses_anonymous_ssh_tunnel(monkeypatch):
     assert proc.poll() is None
     assert url == "https://bright-example.lhr.life"
     assert captured[0][0] == "ssh"
-    assert "nokey@localhost.run" == captured[0][-1]
-    assert "80:localhost:8000" in captured[0]
+    assert "localhost.run" == captured[0][-1]
+    assert str(identity) in captured[0]
+    assert "80:127.0.0.1:8000" in captured[0]
     assert "ServerAliveInterval=30" in captured[0]

@@ -170,6 +170,8 @@ class Settings:
     default_repetition_penalty: float = float(os.environ.get("NAA_REPEAT_PENALTY", "1.08"))
     n_gpu_layers: int = int(os.environ.get("NAA_N_GPU_LAYERS", "-1"))
     flash_attn: bool = os.environ.get("NAA_FLASH_ATTN", "1").lower() in ("1", "true", "yes")
+    cache_type_k: Optional[str] = os.environ.get("NAA_CACHE_TYPE_K") or None
+    cache_type_v: Optional[str] = os.environ.get("NAA_CACHE_TYPE_V") or None
     default_rpm: int = int(os.environ.get("NAA_RPM", os.environ.get("RATE_LIMIT_RPM", "30")))
     sse_heartbeat_secs: float = float(os.environ.get("NAA_SSE_HEARTBEAT", os.environ.get("SSE_HEARTBEAT_SECS", "5.0")))
     model_wait_timeout_secs: float = float(os.environ.get("NAA_MODEL_WAIT_TIMEOUT", "600.0"))

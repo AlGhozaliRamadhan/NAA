@@ -63,24 +63,20 @@ For GGUF models on Kaggle GPU, install `llama-cpp-python` with prebuilt CUDA whe
 ```python
 import os
 
-# 1. Start from base Colab working directory
 %cd /content
 
-# 2. Clone or pull latest NAA repository
-if not os.path.exists("NAA"):
+if not os.path.exists("/content/NAA/.git"):
     print("Repository not found. Cloning...")
-    !git clone https://github.com/AlGhozaliRamadhan/NAA.git NAA
-    %cd /content/NAA
+    !git clone https://github.com/AlGhozaliRamadhan/NAA.git /content/NAA
 else:
-    print("Repository found at NAA. Checking for updates...")
-    %cd /content/NAA
-    !git stash
-    !git pull origin main
-    !git stash drop
+    print("Repository found. Checking for updates...")
+    !git -C /content/NAA pull --ff-only origin main
 
-print("\033[0m", end="")
+%cd /content/NAA
 
-# 3. Install dependencies and launch NAA server
+# Free HTTPS tunnel with no signup, token, or domain.
+os.environ["NAA_TUNNEL_PROVIDER"] = "localhost-run"
+
 !pip install -q -r requirements.txt
 !python naa.py start
 ```
@@ -88,9 +84,20 @@ print("\033[0m", end="")
 For GGUF models on Google Colab GPU:
 
 ```python
+import os
+
+# Stable starting profile for a free 15 GB T4 and this 13.5 GB GGUF.
+os.environ["NAA_CTX"] = "8192"
+os.environ["NAA_MAX_TOKENS"] = "4096"
+os.environ["NAA_FLASH_ATTN"] = "1"
+os.environ["NAA_N_GPU_LAYERS"] = "48"
+os.environ["NAA_CACHE_TYPE_K"] = "q8_0"
+os.environ["NAA_CACHE_TYPE_V"] = "q8_0"
+os.environ["NAA_MODEL_WAIT_TIMEOUT"] = "600"
+os.environ["NAA_TUNNEL_PROVIDER"] = "localhost-run"
+
 !pip install -q -r requirements.txt
-!pip install -q llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
-!python naa.py start --model "https://huggingface.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED/blob/main/Qwen3.8-27B-OBLITERATED-Q4_K_M.gguf"
+!python naa.py start --model "https://huggingface.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED/blob/main/Qwen3.8-27B-OBLITERATED-Q3_K_M.gguf"
 ```
 
 When the server initializes, the terminal displays:
@@ -270,13 +277,15 @@ NAA exposes both tool-capable OpenAI Chat Completions and an Anthropic Messages 
 
 ### Completely free, no account or token
 
-NAA can instead use an anonymous [localhost.run](https://localhost.run/) SSH tunnel. It provides an automatically generated HTTPS URL without an account, token, domain, or extra download:
+NAA can instead use a free [localhost.run](https://localhost.run/) SSH tunnel. It provides an automatically generated HTTPS URL without an account, token, domain, or extra download:
 
 ```python
 os.environ["NAA_TUNNEL_PROVIDER"] = "localhost-run"
 ```
 
-Then start NAA normally. The API summary will print the generated URL and the `naa-...` API key. Anonymous tunnel URLs are temporary and can change after a reconnect, and the free service has no uptime guarantee. NAA enables SSH keepalives and automatically restarts the tunnel; if the URL changes, update the client to the newly printed URL.
+Then start NAA normally. The API summary will print the generated URL and the `naa-...` API key. NAA creates a dedicated local SSH identity, enables keepalives, and reuses that identity when reconnecting so the free hostname can be retained within the notebook runtime. Free hostnames still expire periodically and the service has no uptime guarantee; if localhost.run assigns a new URL, NAA prints the new API base prominently and the client must be updated.
+
+For a 15 GB Colab T4, do not fully offload a 13.5 GB GGUF with a 16K context: model weights are not the only VRAM allocation. Start with `NAA_CTX=8192`, `NAA_N_GPU_LAYERS=48`, Flash Attention, and Q8 KV caches as shown in the Colab GGUF example. If a GGUF process is killed under memory pressure, NAA now prints the child log and automatically retries with progressively safer memory settings rather than silently repeating the same crash.
 
 ### Stable Cloudflare hostname
 
@@ -441,11 +450,16 @@ curl "https://YOUR-URL.trycloudflare.com/v1/admin/stats" \
 | `NAA_PRESET` | `default` | Prompt preset (`default`, `uncensored`, `abliterated`) |
 | `NAA_SYSTEM_PROMPT` | `None` | Global fallback system prompt |
 | `NAA_CTX` | `8192` | Loaded context window; agent clients often benefit from `32768` or more when hardware permits |
+| `NAA_N_GPU_LAYERS` | `-1` | GGUF layers offloaded to GPU; reduce this when model weights nearly fill VRAM |
+| `NAA_FLASH_ATTN` | `1` | Enable llama.cpp Flash Attention for GGUF inference |
+| `NAA_CACHE_TYPE_K` / `NAA_CACHE_TYPE_V` | None | Optional GGUF KV-cache types such as `q8_0` to reduce context memory |
+| `NAA_AUTO_MEMORY_RECOVERY` | `1` | After a hard GGUF crash, retry with safer context/cache/GPU-layer settings |
 | `NAA_PORT` / `PORT` | `8000` | Local port for FastAPI server |
 | `NAA_RPM` | `30` | Default rate limit in requests per minute per key |
 | `NAA_SSE_HEARTBEAT` | `5.0` | Interval in seconds for SSE streaming keepalive comments |
 | `NAA_MODEL_WAIT_TIMEOUT` | `600.0` | Maximum seconds an agent SSE request waits for a reloading model while receiving keepalives |
 | `NAA_TUNNEL_PROVIDER` | `cloudflare` | Tunnel transport: `cloudflare`, `localhost-run` (free/no signup), or `none` |
+| `NAA_SSH_IDENTITY_FILE` | Runtime temporary file | Dedicated SSH key used to retain a localhost.run hostname across reconnects |
 | `NAA_CF_TUNNEL_TOKEN` | None | Token for a remotely-managed Cloudflare Tunnel; required for reliable SSE agent traffic |
 | `NAA_PUBLIC_URL` | None | Stable HTTPS hostname configured for the remotely-managed tunnel, such as `https://naa.example.com` |
 

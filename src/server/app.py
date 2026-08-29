@@ -42,6 +42,8 @@ def create_app(
             n_ctx=settings.max_context,
             n_gpu_layers=settings.n_gpu_layers,
             flash_attn=settings.flash_attn,
+            cache_type_k=settings.cache_type_k,
+            cache_type_v=settings.cache_type_v,
             trust_remote_code=settings.trust_remote_code
         )
 

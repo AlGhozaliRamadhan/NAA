@@ -10,7 +10,7 @@ Backend testing defaults (do not change without updating tests):
 - LoRA URL:        https://huggingface.co/lkzd7/WAN2.2_LoraSet_NSFW
 - lora_strength:   0.8
 - steps:           4
-- profile:         4
+- profile:         2
 - attention:       sage
 - motion_bucket_id: 150
 """
@@ -42,7 +42,7 @@ DEFAULT_VIDEO_LORA_URL = os.environ.get(
 )
 DEFAULT_LORA_STRENGTH = float(os.environ.get("NAA_VIDEO_LORA_STRENGTH", "0.8"))
 DEFAULT_VIDEO_STEPS = int(os.environ.get("NAA_VIDEO_STEPS", "4"))
-DEFAULT_VIDEO_PROFILE = int(os.environ.get("NAA_VIDEO_PROFILE", "4"))
+DEFAULT_VIDEO_PROFILE = int(os.environ.get("NAA_VIDEO_PROFILE", "2"))
 DEFAULT_VIDEO_ATTENTION = os.environ.get("NAA_VIDEO_ATTENTION", "sage").lower()
 DEFAULT_MOTION_BUCKET_ID = int(os.environ.get("NAA_VIDEO_MOTION_BUCKET_ID", "150"))
 

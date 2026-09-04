@@ -183,7 +183,7 @@ class Settings:
     )
     video_lora_strength: float = float(os.environ.get("NAA_VIDEO_LORA_STRENGTH", "0.8"))
     video_steps: int = int(os.environ.get("NAA_VIDEO_STEPS", "4"))
-    video_profile: int = int(os.environ.get("NAA_VIDEO_PROFILE", "4"))
+    video_profile: int = int(os.environ.get("NAA_VIDEO_PROFILE", "2"))
     video_attention: str = os.environ.get("NAA_VIDEO_ATTENTION", "sage").lower()
     video_motion_bucket_id: int = int(os.environ.get("NAA_VIDEO_MOTION_BUCKET_ID", "150"))
     # Backend selection: `--llm` (text chat/completions) and `--visual`

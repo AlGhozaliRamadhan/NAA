@@ -246,6 +246,45 @@ def download_video_model(model_id: Optional[str] = None) -> Path:
             warn(f"Video LoRA prefetch failed (will retry at generation time): {e}")
     return path
 
+def download_image_model(
+    model_id: Optional[str] = None,
+    checkpoint_file: Optional[str] = None,
+) -> Path:
+    """Pre-download a single-file SDXL/Juggernaut-XL checkpoint.
+
+    Diffusers on PyPI (>=0.32.0) supports ``StableDiffusionXLPipeline.
+    from_single_file`` natively, so no source install is required. We pull
+    just the one ``.safetensors`` file (~7 GB) rather than the full repo to
+    keep disk usage low on Kaggle/T4.
+    """
+    from src.core.image_engine import DEFAULT_IMAGE_CHECKPOINT_FILE, DEFAULT_IMAGE_MODEL_ID
+
+    target = model_id or os.environ.get("NAA_IMAGE_MODEL_ID", DEFAULT_IMAGE_MODEL_ID)
+    file_name = checkpoint_file or os.environ.get(
+        "NAA_IMAGE_CHECKPOINT_FILE", DEFAULT_IMAGE_CHECKPOINT_FILE
+    )
+    header(f"Downloading Image Model ({target} :: {file_name})")
+    try:
+        from huggingface_hub import hf_hub_download
+
+        local_dir = MODEL_DIR / target.split("/")[-1]
+        local_dir.mkdir(parents=True, exist_ok=True)
+        kwargs: Dict[str, Any] = {
+            "repo_id": target,
+            "filename": file_name,
+            "local_dir": str(local_dir),
+        }
+        hf_token = os.environ.get("HF_TOKEN")
+        if hf_token:
+            kwargs["token"] = hf_token
+        path = Path(hf_hub_download(**kwargs))
+        ok(f"Image model ready: {path}")
+        return path
+    except Exception as e:
+        err(f"Image model download failed: {e}")
+        sys.exit(1)
+
+
 def _version_tuple(value: str) -> tuple[int, ...]:
     parts = []
     for part in value.split("."):
@@ -1557,12 +1596,44 @@ def cmd_video(args: list = None):
         print("       `python naa.py start --llm` boots LLM-only (add --model ... for the LLM).")
 
 
+def cmd_image(args: list = None):
+    """Manage SDXL/Juggernaut-XL still-image backend: download checkpoint."""
+    print_banner("SDXL-Image")
+    sub = (args or ["help"])[0].lower() if args else "help"
+    rest = (args or [])[1:]
+
+    if sub in ("setup", "install", "download"):
+        # SDXL uses stable diffusers (>=0.32.0) from PyPI — already in
+        # requirements.txt. Just pre-fetch the checkpoint file.
+        model_id = None
+        checkpoint = None
+        for i, tok in enumerate(rest):
+            if tok in ("--model", "-m") and i + 1 < len(rest):
+                model_id = rest[i + 1]
+            elif tok.startswith("--model="):
+                model_id = tok.split("=", 1)[1]
+            elif tok in ("--file", "-f") and i + 1 < len(rest):
+                checkpoint = rest[i + 1]
+            elif tok.startswith("--file="):
+                checkpoint = tok.split("=", 1)[1]
+        download_image_model(model_id, checkpoint)
+        ok("Image setup complete! The server exposes POST /v1/images/generations")
+        ok("(OpenAI-compatible stills backed by SDXL/Juggernaut-XL).")
+    else:
+        print("Usage:")
+        print("  python naa.py image setup [--model RunDiffusion/Juggernaut-XL-v9]")
+        print("                            [--file Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors]")
+        print("")
+        print("  Tip: `python naa.py start --visual` boots visual-only (auto-loads the image backend).")
+
+
 COMMANDS = {
     "setup": cmd_setup,
     "start": cmd_start,
     "keys": cmd_keys,
     "status": cmd_status,
     "video": cmd_video,
+    "image": cmd_image,
 }
 
 def main():

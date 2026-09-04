@@ -60,6 +60,27 @@ class CompletionRequest(BaseModel):
     stream: Optional[bool] = False
     stop: Optional[Union[str, List[str]]] = None
 
+class ImageGenerationRequest(BaseModel):
+    """OpenAI-compatible image request.
+
+    Served by the Wan 2.2 visual backend as a single still frame — no separate
+    text-to-image checkpoint download needed. Extra keys (``response_format``,
+    ``style``, ...) are accepted and ignored.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    prompt: str = Field(min_length=1)
+    model: Optional[str] = Field(default=None)
+    size: Optional[str] = Field(default=None)
+    quality: Optional[str] = Field(default=None)
+    negative_prompt: Optional[str] = None
+    seed: Optional[int] = None
+    guidance_scale: Optional[float] = Field(default=None, ge=0.0, le=20.0)
+    num_inference_steps: Optional[int] = Field(default=None, ge=1, le=100)
+    n: Optional[int] = Field(default=1, ge=1, le=4)
+
+
 class CreateKeyRequest(BaseModel):
     name: str
     role: str = "user"

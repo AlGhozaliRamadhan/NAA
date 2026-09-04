@@ -62,10 +62,14 @@ async def create_video_generation(
     """Submit a T2V (no ``image``) or I2V (with ``image``) job. Returns 202 + job."""
     engine = _engine(request)
     km = request.app.state.key_manager
+    # Same guard as the images shim: ignore placeholder model ids (no "/")
+    # so clients sending e.g. "flux-1" don't trigger bogus HF downloads.
+    resolved = resolve_video_model_id(body.model) if body.model else None
+    model = resolved if resolved and "/" in resolved else None
     job = engine.submit(
         prompt=body.prompt,
         image=body.image,
-        model=resolve_video_model_id(body.model) if body.model else None,
+        model=model,
         negative_prompt=body.negative_prompt,
         num_frames=body.num_frames or 81,
         height=body.height or 704,

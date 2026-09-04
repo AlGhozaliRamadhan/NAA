@@ -58,6 +58,26 @@ def _make_alias(alias_id: str, root: str, display: str) -> Dict[str, Any]:
 
 @router.get("/models")
 async def list_models(request: Request, kd: Dict[str, Any] = Depends(get_api_key)):
+    if not getattr(request.app.state, "llm_enabled", True):
+        # Visual-only: advertise the Wan visual checkpoints instead of the
+        # (disabled) LLM so image/chat clients can pick a usable model id.
+        from src.core.video_engine import VIDEO_MODEL_ALIASES, get_video_engine
+
+        engine = getattr(request.app.state, "video_engine", None) or get_video_engine()
+        seen: List[Dict[str, Any]] = []
+        for mid in [engine.model_id, *VIDEO_MODEL_ALIASES.values()]:
+            if mid and all(m["id"] != mid for m in seen):
+                seen.append(
+                    {
+                        "id": mid,
+                        "object": "model",
+                        "created": 1700000000,
+                        "owned_by": "naa-video",
+                        "capabilities": ["text-to-video", "image-to-video", "text-to-image"],
+                    }
+                )
+        return {"object": "list", "data": seen}
+
     engine = getattr(request.app.state, "engine", None)
     active_model = (
         getattr(engine, "model_name", settings.model_name) if engine else settings.model_name

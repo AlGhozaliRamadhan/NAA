@@ -1490,7 +1490,8 @@ def cmd_video(args: list = None):
             elif tok.startswith("--model="):
                 model = tok.split("=", 1)[1]
         download_video_model(model)
-        ok("Video setup complete! The server exposes POST /v1/videos/generations (T2V + I2V).")
+        ok("Video setup complete! The server exposes POST /v1/videos/generations (T2V + I2V)")
+        ok("and POST /v1/images/generations (OpenAI-compatible stills, e.g. for clauoff).")
     elif sub in ("generate", "gen", "create"):
         import json as _json
 

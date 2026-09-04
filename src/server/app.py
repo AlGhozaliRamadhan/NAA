@@ -24,6 +24,7 @@ from src.server.routes.chat import router as chat_router
 from src.server.routes.anthropic import router as anthropic_router
 from src.server.routes.completions import router as completions_router
 from src.server.routes.admin import router as admin_router
+from src.server.routes.images import router as images_router
 from src.server.routes.videos import router as videos_router
 
 logger = logging.getLogger("naa-app")
@@ -138,6 +139,59 @@ def create_app(
             headers=exc.headers,
         )
 
+    @app.exception_handler(404)
+    async def not_found_handler(request: Request, exc: HTTPException):
+        if exc.detail != "Not Found":
+            # A route matched but the resource is missing (e.g. unknown
+            # video job id) — keep the specific message as-is.
+            return await http_exception_handler(request, exc)
+        # No route matched at all: say which backends are up and what
+        # exists, so a client pointed at a disabled backend (e.g. chat
+        # completions on a visual-only server) gets an answer, not a riddle.
+        if visual_only:
+            mode = "visual-only (Wan 2.2 video; LLM disabled)"
+        elif not visual_enabled:
+            mode = "LLM-only (video routes disabled)"
+        else:
+            mode = "full (LLM + visual)"
+        available = ["GET /health", "GET /ping", "GET /docs"]
+        if llm_enabled:
+            available += [
+                "GET /v1/models",
+                "POST /v1/chat/completions",
+                "POST /v1/completions",
+                "POST /v1/messages",
+            ]
+        if visual_enabled:
+            available += [
+                "GET /v1/videos/config",
+                "GET /v1/videos/models",
+                "POST /v1/videos/generations",
+                "GET /v1/videos",
+                "GET /v1/videos/{job_id}",
+                "GET /v1/videos/{job_id}/download",
+                "POST /v1/images/generations",
+            ]
+        available += ["POST /v1/admin/keys/create", "GET /v1/admin/stats"]
+        return JSONResponse(
+            status_code=404,
+            content={
+                "error": {
+                    "message": (
+                        f"Unknown endpoint: {request.method} {request.url.path}. "
+                        f"This server is running in {mode} mode."
+                    ),
+                    "type": "invalid_request_error",
+                    "param": None,
+                    "code": 404,
+                },
+                "mode": "visual" if visual_only else "standard",
+                "llm_enabled": llm_enabled,
+                "visual_enabled": visual_enabled,
+                "available_endpoints": available,
+            },
+        )
+
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(request: Request, exc: RequestValidationError):
         errors = exc.errors()
@@ -155,14 +209,17 @@ def create_app(
         )
 
     app.include_router(health_router)
+    # Models listing stays mounted in visual-only so image clients can
+    # discover the visual checkpoints (it branches internally on llm_enabled).
+    app.include_router(models_router)
     if llm_enabled:
-        app.include_router(models_router)
         app.include_router(chat_router)
         app.include_router(anthropic_router)
         app.include_router(completions_router)
     app.include_router(admin_router)
     if visual_enabled:
         app.include_router(videos_router)
+        app.include_router(images_router)
 
     return app
 

@@ -288,6 +288,20 @@ response = llm.invoke("What are the primary tradeoffs of microservices?")
 print(response.content)
 ```
 
+### 5. Images (OpenAI-compatible, via the visual backend)
+
+No separate text-to-image checkpoint is downloaded: the Wan 2.2 visual
+backend renders a single still frame. Point any OpenAI image client
+(e.g. clauoff) at the NAA base URL:
+
+```bash
+curl -X POST "https://YOUR-URL.trycloudflare.com/v1/images/generations" \
+  -H "Authorization: Bearer naa-YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "A cat surfing at the beach", "size": "1024x1024"}'
+# -> { "created": ..., "data": [{ "b64_json": "...", "revised_prompt": "..." }] }
+```
+
 ---
 
 ## Coding Agent Setup

@@ -116,44 +116,6 @@ def decode_image_payload(image: Optional[str]) -> Optional[bytes]:
         return None
 
 
-def _mock_still_png(prompt: str = "", width: int = 256, height: int = 256) -> bytes:
-    """Deterministic placeholder PNG for mock mode (no GPU/diffusers).
-
-    Kept small (downscaled) so the base64 payload stays light in tests and
-    in the OpenAI images shim. Colour derives from the prompt hash so
-    different prompts give visibly different placeholders.
-    """
-    import hashlib
-
-    w = max(64, min(512, int(width) // 4 or 64))
-    h = max(64, min(512, int(height) // 4 or 64))
-    try:
-        from PIL import Image
-
-        digest = hashlib.md5(prompt.encode("utf-8")).digest()
-        img = Image.new("RGB", (w, h), (digest[0], digest[1], digest[2]))
-        buf = io.BytesIO()
-        img.save(buf, format="PNG")
-        return buf.getvalue()
-    except Exception:
-        # Minimal 1x1 RGB PNG fallback (PIL missing).
-        import struct
-        import zlib
-
-        def chunk(ctype: bytes, data: bytes) -> bytes:
-            c = ctype + data
-            return struct.pack(">I", len(data)) + c + struct.pack(">I", zlib.crc32(c) & 0xFFFFFFFF)
-
-        ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
-        raw = b"\x00\xff\x00\x00"
-        return (
-            b"\x89PNG\r\n\x1a\n"
-            + chunk(b"IHDR", ihdr)
-            + chunk(b"IDAT", zlib.compress(raw))
-            + chunk(b"IEND", b"")
-        )
-
-
 @dataclass
 class VideoJob:
     id: str
@@ -494,80 +456,6 @@ class VideoEngine:
         output = pipe(**call_kwargs)
         frames = output.frames[0] if hasattr(output, "frames") else output
         export_to_video(frames, str(out_path), fps=int(params.get("fps", 24)))
-
-    def generate_still(
-        self,
-        prompt: str,
-        model: Optional[str] = None,
-        negative_prompt: Optional[str] = None,
-        width: int = 1024,
-        height: int = 1024,
-        num_inference_steps: Optional[int] = None,
-        guidance_scale: float = 5.0,
-        seed: Optional[int] = None,
-    ) -> bytes:
-        """Render a single still frame and return PNG bytes.
-
-        Backs the OpenAI-compatible ``POST /v1/images/generations`` shim so
-        image clients (e.g. clauoff) work against the visual backend without
-        downloading a separate text-to-image checkpoint. In mock mode (no
-        GPU/diffusers) returns a deterministic placeholder PNG.
-        """
-        width = max(256, min(2048, int(width)))
-        height = max(256, min(1536, int(height)))
-        pipe = self._ensure_pipeline(model or self.model_id)
-        if pipe is None or getattr(self, "_mock_mode", False) or not callable(pipe):
-            return _mock_still_png(prompt, width, height)
-
-        import torch
-
-        generator = None
-        if seed is not None:
-            try:
-                device = "cuda" if torch.cuda.is_available() else "cpu"
-                generator = torch.Generator(device=device).manual_seed(int(seed))
-            except Exception:
-                generator = None
-
-        call_kwargs: Dict[str, Any] = {
-            "prompt": prompt,
-            "height": height,
-            "width": width,
-            "num_frames": 1,
-            "guidance_scale": float(guidance_scale),
-            "num_inference_steps": int(num_inference_steps or self.steps),
-            "generator": generator,
-        }
-        if negative_prompt:
-            call_kwargs["negative_prompt"] = negative_prompt
-        try:
-            output = pipe(**call_kwargs)
-        except Exception as exc:
-            # Some checkpoints refuse single-frame renders; fall back to a
-            # short clip and keep the first frame.
-            logger.warning("Single-frame render failed (%s); using short-clip fallback.", exc)
-            call_kwargs["num_frames"] = 9
-            output = pipe(**call_kwargs)
-        frames = output.frames[0] if hasattr(output, "frames") else output
-        first = frames[0]
-        try:
-            import numpy as np
-            from PIL import Image
-
-            if isinstance(first, Image.Image):
-                pil = first
-            else:
-                arr = first
-                if hasattr(arr, "cpu"):  # torch tensor -> numpy
-                    arr = arr.cpu().numpy()
-                if hasattr(arr, "numpy"):  # e.g. numpy-backed array proxy
-                    arr = arr.numpy()
-                pil = Image.fromarray(np.asarray(arr))
-        except Exception as exc:
-            raise RuntimeError(f"Could not convert Wan output frame to PNG: {exc}") from exc
-        buf = io.BytesIO()
-        pil.save(buf, format="PNG")
-        return buf.getvalue()
 
     def _render_mock(self, out_path: Path, job: VideoJob) -> None:
         """Write a tiny placeholder mp4 so tests work without GPU/diffusers."""

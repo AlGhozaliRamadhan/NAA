@@ -34,6 +34,7 @@ def create_app(
     key_manager: APIKeyManager = None,
     auto_load_model: bool = True,
     video_engine=None,
+    image_engine=None,
     llm_enabled: bool = None,
     visual_enabled: bool = None,
 ) -> FastAPI:
@@ -100,6 +101,7 @@ def create_app(
     app.state.engine = engine
     app.state.key_manager = key_manager
     app.state.video_engine = video_engine
+    app.state.image_engine = image_engine
     app.state.llm_enabled = llm_enabled
     app.state.visual_enabled = visual_enabled
     app.state.visual_only = visual_only

@@ -1,8 +1,10 @@
-"""OpenAI-compatible image endpoints backed by the Wan 2.2 visual engine.
+"""OpenAI-compatible image endpoint backed by SDXL/Juggernaut-XL.
 
 Image clients (e.g. clauoff) POST to ``/v1/images/generations`` and expect an
-immediate ``{ data: [{ b64_json }] }`` payload — no separate text-to-image
-checkpoint download needed: the visual backend renders a single still frame.
+immediate ``{ data: [{ b64_json }] }`` payload. Wan 2.2 used to back this as
+a single-frame render but is too heavy for stills on a T4; the route now
+goes straight to the dedicated ``ImageEngine`` (SDXL) which fits and runs
+fast on consumer GPUs.
 """
 
 from __future__ import annotations
@@ -14,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from fastapi import APIRouter, Depends, Request
 from starlette.concurrency import run_in_threadpool
 
-from src.core.video_engine import get_video_engine, resolve_video_model_id
+from src.core.image_engine import get_image_engine
 from src.server.auth import get_api_key
 from src.server.schemas import ImageGenerationRequest
 
@@ -36,10 +38,10 @@ def _parse_size(size: Optional[str]) -> Tuple[int, int]:
 
 
 def _engine(request: Request):
-    engine = getattr(request.app.state, "video_engine", None)
+    engine = getattr(request.app.state, "image_engine", None)
     if engine is None:
-        engine = get_video_engine()
-        request.app.state.video_engine = engine
+        engine = get_image_engine()
+        request.app.state.image_engine = engine
     return engine
 
 
@@ -54,20 +56,13 @@ async def create_image_generation(
     km = request.app.state.key_manager
     width, height = _parse_size(body.size)
     n = max(1, min(4, body.n or 1))
-    data: List[Dict[str, Any]] = []
-    # Only honor model values that resolve to a real checkpoint (alias or
-    # owner/repo). Image clients often send placeholder ids like "flux-1" —
-    # those must NOT trigger a bogus HuggingFace download; fall back to the
-    # engine default instead.
-    resolved = resolve_video_model_id(body.model) if body.model else None
-    model = resolved if resolved and "/" in resolved else None
     guidance = body.guidance_scale if body.guidance_scale is not None else 5.0
+    data: List[Dict[str, Any]] = []
     for _ in range(n):
-        # Diffusion render blocks for seconds/minutes — keep it off the loop.
+        # SDXL render blocks for seconds — keep it off the event loop.
         png = await run_in_threadpool(
-            engine.generate_still,
+            engine.generate,
             body.prompt,
-            model,
             body.negative_prompt,
             width,
             height,
@@ -82,4 +77,4 @@ async def create_image_generation(
             }
         )
     km.record_usage(kd["key"], 1)
-    return {"created": int(time.time()), "model": model or engine.model_id, "data": data}
+    return {"created": int(time.time()), "model": engine.model_id, "data": data}

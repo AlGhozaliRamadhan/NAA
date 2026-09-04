@@ -41,7 +41,7 @@ def test_backend_testing_defaults():
     assert DEFAULT_VIDEO_LORA_URL == "https://huggingface.co/lkzd7/WAN2.2_LoraSet_NSFW"
     assert DEFAULT_LORA_STRENGTH == 0.8
     assert DEFAULT_VIDEO_STEPS == 4
-    assert DEFAULT_VIDEO_PROFILE == 4
+    assert DEFAULT_VIDEO_PROFILE == 2
     assert DEFAULT_VIDEO_ATTENTION == "sage"
     assert DEFAULT_MOTION_BUCKET_ID == 150
 
@@ -75,7 +75,7 @@ def test_video_config_endpoint(client: TestClient, user_headers, tmp_path, monke
     assert data["lora_url"] == "https://huggingface.co/lkzd7/WAN2.2_LoraSet_NSFW"
     assert data["lora_strength"] == 0.8
     assert data["steps"] == 4
-    assert data["profile"] == 4
+    assert data["profile"] == 2
     assert data["attention"] == "sage"
     assert data["motion_bucket_id"] == 150
 

@@ -176,6 +176,16 @@ class Settings:
     sse_heartbeat_secs: float = float(os.environ.get("NAA_SSE_HEARTBEAT", os.environ.get("SSE_HEARTBEAT_SECS", "5.0")))
     model_wait_timeout_secs: float = float(os.environ.get("NAA_MODEL_WAIT_TIMEOUT", "600.0"))
     trust_remote_code: bool = os.environ.get("NAA_TRUST_REMOTE_CODE", "1").lower() in ("1", "true", "yes")
+    # Wan 2.2 video generation defaults (backend testing configuration)
+    video_model_id: str = os.environ.get("NAA_VIDEO_MODEL_ID", "Wan-AI/Wan2.2-TI2V-5B-Diffusers")
+    video_lora_url: str = os.environ.get(
+        "NAA_VIDEO_LORA_URL", "https://huggingface.co/lkzd7/WAN2.2_LoraSet_NSFW"
+    )
+    video_lora_strength: float = float(os.environ.get("NAA_VIDEO_LORA_STRENGTH", "0.8"))
+    video_steps: int = int(os.environ.get("NAA_VIDEO_STEPS", "4"))
+    video_profile: int = int(os.environ.get("NAA_VIDEO_PROFILE", "4"))
+    video_attention: str = os.environ.get("NAA_VIDEO_ATTENTION", "sage").lower()
+    video_motion_bucket_id: int = int(os.environ.get("NAA_VIDEO_MOTION_BUCKET_ID", "150"))
     port: int = PORT
     quiet: bool = QUIET
 

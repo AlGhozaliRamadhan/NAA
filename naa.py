@@ -45,6 +45,9 @@ from src.cli import (
     cmd_start,
     cmd_keys,
     cmd_status,
+    cmd_video,
+    download_video_model,
+    install_video_deps,
     main,
 )
 from src.tunnel.cloudflare import (

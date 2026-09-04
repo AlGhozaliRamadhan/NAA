@@ -71,3 +71,33 @@ class RevokeKeyRequest(BaseModel):
 class EmbeddingRequest(BaseModel):
     model: str = Field(default="NAA-AI-Model")
     input: Union[str, List[str]]
+
+
+class VideoGenerationRequest(BaseModel):
+    """Unified Text-to-Video / Image-to-Video request for Wan 2.2.
+
+    Provide ``image`` (base64, data-URI, file path, or http(s) URL) for
+    image-to-video; omit it for pure text-to-video. Unspecified generation
+    knobs fall back to the backend testing defaults in
+    ``src/core/video_engine.py`` (LoRA lkzd7/WAN2.2_LoraSet_NSFW @ 0.8,
+    steps=4, profile=4, attention=sage, motion_bucket_id=150).
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    model: Optional[str] = Field(default=None)
+    prompt: str = Field(min_length=1)
+    image: Optional[str] = Field(default=None)
+    negative_prompt: Optional[str] = None
+    num_frames: Optional[int] = Field(default=81, ge=1, le=241)
+    height: Optional[int] = Field(default=704, ge=64, le=1536)
+    width: Optional[int] = Field(default=1280, ge=64, le=2048)
+    num_inference_steps: Optional[int] = Field(default=None, ge=1, le=100)
+    guidance_scale: Optional[float] = Field(default=5.0, ge=0.0, le=20.0)
+    fps: Optional[int] = Field(default=24, ge=1, le=60)
+    seed: Optional[int] = None
+    lora_url: Optional[str] = None
+    lora_strength: Optional[float] = Field(default=None, ge=0.0, le=2.0)
+    profile: Optional[int] = Field(default=None, ge=0, le=4)
+    attention: Optional[str] = None
+    motion_bucket_id: Optional[int] = Field(default=None, ge=1, le=1000)

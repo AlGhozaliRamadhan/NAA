@@ -24,13 +24,15 @@ from src.server.routes.chat import router as chat_router
 from src.server.routes.anthropic import router as anthropic_router
 from src.server.routes.completions import router as completions_router
 from src.server.routes.admin import router as admin_router
+from src.server.routes.videos import router as videos_router
 
 logger = logging.getLogger("naa-app")
 
 def create_app(
     engine: InferenceEngine = None,
     key_manager: APIKeyManager = None,
-    auto_load_model: bool = True
+    auto_load_model: bool = True,
+    video_engine=None,
 ) -> FastAPI:
     if engine is None:
         engine = InferenceEngine(
@@ -72,6 +74,7 @@ def create_app(
 
     app.state.engine = engine
     app.state.key_manager = key_manager
+    app.state.video_engine = video_engine
     app.state.start_time = datetime.now(timezone.utc)
 
     app.add_middleware(
@@ -130,6 +133,7 @@ def create_app(
     app.include_router(anthropic_router)
     app.include_router(completions_router)
     app.include_router(admin_router)
+    app.include_router(videos_router)
 
     return app
 

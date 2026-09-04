@@ -166,7 +166,7 @@ def run_pip(packages: list, extra_args: list = None, env: dict = None) -> bool:
     r = subprocess.run(cmd, env=env)
     return r.returncode == 0
 
-def install_deps():
+def install_deps(video: bool = False):
     header("Installing Dependencies")
     step(1, "Core server packages (fastapi, uvicorn, huggingface_hub, pydantic, etc.)")
     run_pip(["fastapi>=0.111.0", "uvicorn[standard]>=0.29.0", "python-multipart>=0.0.9", "huggingface_hub>=0.23.0", "pydantic>=2.0.0", "requests>=2.31.0"])
@@ -174,7 +174,65 @@ def install_deps():
     step(2, "Inference engine (transformers, torch, accelerate, bitsandbytes, jinja2)")
     packages = ["transformers>=4.45.0", "accelerate>=0.28.0", "bitsandbytes>=0.43.0", "jinja2>=3.1.4"]
     run_pip(packages)
+
+    if video or os.environ.get("NAA_VIDEO", "").lower() in ("1", "true", "yes"):
+        step(3, "Video engine (diffusers from source for Wan 2.2, safetensors, Pillow, imageio)")
+        run_pip(["git+https://github.com/huggingface/diffusers", "safetensors>=0.4.0", "Pillow>=10.0.0", "imageio>=2.31.0", "imageio-ffmpeg>=0.4.9"])
+        info("Optional: pip install sageattention  # SageAttention kernel (NAA_VIDEO_ATTENTION=sage)")
     ok("Dependencies ready")
+
+
+def install_video_deps() -> bool:
+    """Install the Wan 2.2 video stack (diffusers from source + helpers)."""
+    header("Installing Video Dependencies (Wan 2.2)")
+    ok1 = run_pip(["git+https://github.com/huggingface/diffusers", "safetensors>=0.4.0", "Pillow>=10.0.0", "imageio>=2.31.0", "imageio-ffmpeg>=0.4.9"])
+    if ok1:
+        ok("Video dependencies ready (diffusers from source for Wan 2.2)")
+    else:
+        err("Video dependency install failed.")
+    return ok1
+
+
+def download_video_model(model_id: Optional[str] = None) -> Path:
+    """Pre-download a Wan 2.2 checkpoint + the default NSFW LoRA set."""
+    from src.core.video_engine import (
+        DEFAULT_VIDEO_LORA_URL,
+        parse_lora_repo,
+        resolve_video_model_id,
+    )
+
+    target = resolve_video_model_id(model_id or os.environ.get("NAA_VIDEO_MODEL_ID", "Wan-AI/Wan2.2-TI2V-5B-Diffusers"))
+    header(f"Downloading Video Model ({target})")
+    try:
+        from huggingface_hub import snapshot_download
+
+        kwargs: Dict[str, Any] = {
+            "repo_id": target,
+            "local_dir": str(MODEL_DIR / target.split("/")[-1]),
+            "local_dir_use_symlinks": False,
+            "tqdm_class": NotebookProgressBar,
+        }
+        hf_token = os.environ.get("HF_TOKEN")
+        if hf_token:
+            kwargs["token"] = hf_token
+        path = Path(snapshot_download(**kwargs))
+        ok(f"Video model ready: {path}")
+    except Exception as e:
+        err(f"Video model download failed: {e}")
+        sys.exit(1)
+
+    lora_repo = parse_lora_repo(os.environ.get("NAA_VIDEO_LORA_URL", DEFAULT_VIDEO_LORA_URL))
+    if lora_repo:
+        info(f"Pre-fetching video LoRA: {lora_repo}")
+        try:
+            from huggingface_hub import snapshot_download as _snap
+
+            _snap(repo_id=lora_repo, local_dir=str(MODEL_DIR / lora_repo.split("/")[-1]),
+                  local_dir_use_symlinks=False, tqdm_class=NotebookProgressBar)
+            ok(f"Video LoRA ready: {lora_repo}")
+        except Exception as e:
+            warn(f"Video LoRA prefetch failed (will retry at generation time): {e}")
+    return path
 
 def _version_tuple(value: str) -> tuple[int, ...]:
     parts = []
@@ -1268,11 +1326,78 @@ def cmd_status(args: list = None):
         else:
             print(f"  Server:    Not running")
 
+def cmd_video(args: list = None):
+    """Manage Wan 2.2 video generation: setup deps/model or submit a job."""
+    print_banner("Wan2.2-Video")
+    sub = (args or ["help"])[0].lower() if args else "help"
+    rest = (args or [])[1:]
+
+    if sub in ("setup", "install"):
+        install_video_deps()
+        model = None
+        for i, tok in enumerate(rest):
+            if tok in ("--model", "-m") and i + 1 < len(rest):
+                model = rest[i + 1]
+            elif tok.startswith("--model="):
+                model = tok.split("=", 1)[1]
+        download_video_model(model)
+        ok("Video setup complete! The server exposes POST /v1/videos/generations (T2V + I2V).")
+    elif sub in ("generate", "gen", "create"):
+        import json as _json
+
+        state = load_state()
+        admin_key = state.get("admin_key")
+        if not admin_key:
+            err("No admin key found. Run start first.")
+            return
+        prompt = None
+        image = None
+        i = 0
+        while i < len(rest):
+            tok = rest[i]
+            if tok in ("--prompt", "-p") and i + 1 < len(rest):
+                prompt = rest[i + 1]
+                i += 2
+            elif tok.startswith("--prompt="):
+                prompt = tok.split("=", 1)[1]
+                i += 1
+            elif tok in ("--image", "-i") and i + 1 < len(rest):
+                image = rest[i + 1]
+                i += 2
+            elif tok.startswith("--image="):
+                image = tok.split("=", 1)[1]
+                i += 1
+            else:
+                i += 1
+        if not prompt:
+            err("Usage: python naa.py video generate --prompt \"...\" [--image path|url|base64]")
+            return
+        payload: Dict[str, Any] = {"prompt": prompt}
+        if image:
+            p = Path(image)
+            if p.is_file():
+                import base64 as _b64
+
+                payload["image"] = _b64.b64encode(p.read_bytes()).decode()
+            else:
+                payload["image"] = image
+        data = api_call("POST", "/v1/videos/generations", admin_key, payload)
+        if data:
+            print(_json.dumps(data, indent=2))
+            mode = "image-to-video" if image else "text-to-video"
+            ok(f"Submitted {mode} job {data.get('id')}. Poll: GET /v1/videos/{data.get('id')}")
+    else:
+        print("Usage:")
+        print("  python naa.py video setup [--model Wan-AI/Wan2.2-TI2V-5B-Diffusers]")
+        print("  python naa.py video generate --prompt \"...\" [--image path|url|base64]")
+
+
 COMMANDS = {
     "setup": cmd_setup,
     "start": cmd_start,
     "keys": cmd_keys,
     "status": cmd_status,
+    "video": cmd_video,
 }
 
 def main():
@@ -1282,7 +1407,7 @@ def main():
     elif args[0] in COMMANDS:
         COMMANDS[args[0]](args[1:])
     else:
-        print("Usage: python naa.py [setup|start|keys|status]")
+        print("Usage: python naa.py [setup|start|keys|status|video]")
 
 if __name__ == "__main__":
     main()

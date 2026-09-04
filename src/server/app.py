@@ -33,7 +33,17 @@ def create_app(
     key_manager: APIKeyManager = None,
     auto_load_model: bool = True,
     video_engine=None,
+    llm_enabled: bool = None,
+    visual_enabled: bool = None,
 ) -> FastAPI:
+    if llm_enabled is None:
+        llm_enabled = settings.llm_enabled
+    if visual_enabled is None:
+        visual_enabled = settings.visual_enabled
+    # Visual-only: LLM disabled (e.g. `start --visual` without `--llm`).
+    visual_only = not llm_enabled and visual_enabled
+    if not llm_enabled and not visual_enabled:
+        raise ValueError("Nothing to serve: both llm_enabled and visual_enabled are False.")
     if engine is None:
         engine = InferenceEngine(
             model_path=settings.model_path,
@@ -57,7 +67,21 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        if auto_load_model and Path(settings.model_path).exists():
+        if visual_only:
+            from src.core.video_engine import get_video_engine
+
+            if app.state.video_engine is None:
+                app.state.video_engine = get_video_engine(
+                    model_id=settings.video_model_id,
+                    lora_url=settings.video_lora_url,
+                    lora_strength=settings.video_lora_strength,
+                    steps=settings.video_steps,
+                    profile=settings.video_profile,
+                    attention=settings.video_attention,
+                    motion_bucket_id=settings.video_motion_bucket_id,
+                )
+            logger.info("Visual-only mode: LLM engine disabled; Wan 2.2 video backend active.")
+        elif auto_load_model and Path(settings.model_path).exists():
             threading.Thread(target=engine.load, daemon=True).start()
         else:
             logger.warning(f"Model path {settings.model_path} does not exist. Awaiting download or configuration.")
@@ -75,6 +99,9 @@ def create_app(
     app.state.engine = engine
     app.state.key_manager = key_manager
     app.state.video_engine = video_engine
+    app.state.llm_enabled = llm_enabled
+    app.state.visual_enabled = visual_enabled
+    app.state.visual_only = visual_only
     app.state.start_time = datetime.now(timezone.utc)
 
     app.add_middleware(
@@ -128,12 +155,14 @@ def create_app(
         )
 
     app.include_router(health_router)
-    app.include_router(models_router)
-    app.include_router(chat_router)
-    app.include_router(anthropic_router)
-    app.include_router(completions_router)
+    if llm_enabled:
+        app.include_router(models_router)
+        app.include_router(chat_router)
+        app.include_router(anthropic_router)
+        app.include_router(completions_router)
     app.include_router(admin_router)
-    app.include_router(videos_router)
+    if visual_enabled:
+        app.include_router(videos_router)
 
     return app
 

@@ -25,6 +25,44 @@ async def health(request: Request):
     engine = request.app.state.engine
     start_time = request.app.state.start_time
     uptime = (datetime.now(timezone.utc) - start_time).total_seconds()
+    visual_only = bool(getattr(request.app.state, "visual_only", False))
+    if visual_only:
+        video_engine = getattr(request.app.state, "video_engine", None)
+        video_model = getattr(video_engine, "model_id", settings.video_model_id)
+        return {
+            "ok": True,
+            "status": "ok",
+            "service": "NAA (Notebooks AI API)",
+            "mode": "visual",
+            "model_loaded": True,
+            "model_loading": False,
+            "load_stage": "ready",
+            "load_error": None,
+            "model": video_model,
+            "llm_enabled": False,
+            "visual_enabled": True,
+            "video": (
+                video_engine.default_config()
+                if video_engine is not None and hasattr(video_engine, "default_config")
+                else {
+                    "model": video_model,
+                    "lora_url": settings.video_lora_url,
+                    "lora_strength": settings.video_lora_strength,
+                    "steps": settings.video_steps,
+                    "profile": settings.video_profile,
+                    "attention": settings.video_attention,
+                    "motion_bucket_id": settings.video_motion_bucket_id,
+                }
+            ),
+            "environment": ENV["name"],
+            "gpu": ENV["gpu_name"] or "CPU",
+            "gpu_count": ENV["gpu_count"],
+            "gpu_vram_used_mb": 0,
+            "gpu_vram_total_mb": ENV.get("gpu_vram_mb", 0),
+            "uptime": uptime,
+            "uptime_seconds": uptime,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
     active_model = getattr(engine, "model_name", settings.model_name)
     load_stage = getattr(engine, "load_stage", "ready" if getattr(engine, "model_loaded", False) else "loading")
     load_error = getattr(engine, "load_error", None)

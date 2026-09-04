@@ -36,7 +36,11 @@ def start_keepalive(port: int):
 
 def is_server_healthy(port: int) -> bool:
     data = get_server_health(port)
-    return bool(data and data.get("model_loaded"))
+    if not data:
+        return False
+    if data.get("mode") == "visual":
+        return bool(data.get("ok", True))
+    return bool(data.get("model_loaded"))
 
 
 def is_server_loading(port: int) -> bool:
@@ -55,6 +59,8 @@ def public_health_ok(url: str, timeout: float = 10.0) -> bool:
             with urllib.request.urlopen(f"{url}/health", timeout=3) as r:
                 if r.status == 200:
                     data = json.loads(r.read())
+                    if data.get("mode") == "visual":
+                        return bool(data.get("ok", True))
                     if data.get("model_loaded"):
                         return True
         except Exception:

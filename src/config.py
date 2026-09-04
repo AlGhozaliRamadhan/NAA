@@ -186,6 +186,14 @@ class Settings:
     video_profile: int = int(os.environ.get("NAA_VIDEO_PROFILE", "4"))
     video_attention: str = os.environ.get("NAA_VIDEO_ATTENTION", "sage").lower()
     video_motion_bucket_id: int = int(os.environ.get("NAA_VIDEO_MOTION_BUCKET_ID", "150"))
+    # Backend selection: `--llm` (text chat/completions) and `--visual`
+    # (Wan video). Both default on so plain `start` is backward compatible.
+    # Legacy alias: NAA_VIDEO_ONLY=1 == visual-only.
+    llm_enabled: bool = (
+        os.environ.get("NAA_LLM", "1").lower() not in ("0", "false", "no")
+        and os.environ.get("NAA_VIDEO_ONLY", "").lower() not in ("1", "true", "yes")
+    )
+    visual_enabled: bool = os.environ.get("NAA_VISUAL", "1").lower() not in ("0", "false", "no")
     port: int = PORT
     quiet: bool = QUIET
 

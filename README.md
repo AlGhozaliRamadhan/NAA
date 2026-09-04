@@ -50,6 +50,14 @@ print("\033[0m", end="")
 !python naa.py start
 ```
 
+Visual-only on Kaggle (Wan 2.2 video, skips the LLM entirely):
+
+```python
+!pip install -q -r requirements.txt
+!python naa.py video setup
+!python naa.py start --visual
+```
+
 For GGUF models on Kaggle GPU, install `llama-cpp-python` with prebuilt CUDA wheels:
 
 ```python
@@ -127,6 +135,9 @@ NAA supports flexible model resolution and runtime configuration via CLI flags, 
 | `--model` | `-m` | Hugging Face repo ID, direct GGUF URL, repo:file, or quant profile | `--model Qwen/Qwen2.5-7B-Instruct` |
 | `--preset` | `-p` | Prompt preset (`default`, `uncensored`, `abliterated`) | `--preset uncensored` |
 | `--system-prompt` | `-s` | Global system prompt override | `--system-prompt "You are a specialized code reviewer."` |
+| `--llm` | | Enable the LLM backend (chat/completions); `--no-llm` disables it | `start --llm` (LLM-only) |
+| `--visual` | | Enable the Wan 2.2 video backend (aliases: `--video`, `--wan`); `--no-visual` disables it | `start --visual` (visual-only, skips LLM) |
+| `--visual-model` | | Custom Wan checkpoint or alias (`wan2.2`, `wan2.2-t2v-a14b`, `wan2.2-i2v-a14b`) | `--visual-model Wan-AI/Wan2.2-T2V-A14B-Diffusers` |
 
 ### Model Specification Formats
 
@@ -157,11 +168,20 @@ NAA automatically parses and routes all common model source formats:
 ### Common Commands
 
 ```bash
-# Start server with default auto-detected configuration
+# Start server with default auto-detected configuration (LLM + visual)
 python naa.py start
 
 # Start server with an uncensored deliberation preset
 python naa.py start --model cognitivecomputations/dolphin-2.9.4-llama3.1-8b --preset uncensored
+
+# Visual-only: Wan 2.2 video backend, skips the LLM download/load entirely
+python naa.py start --visual
+
+# LLM-only (no video routes)
+python naa.py start --llm
+
+# Both backends with a custom visual checkpoint
+python naa.py start --llm --visual --visual-model Wan-AI/Wan2.2-T2V-A14B-Diffusers
 
 # Setup and download model weights before launching the server
 python naa.py setup --model Qwen/Qwen2.5-7B-Instruct

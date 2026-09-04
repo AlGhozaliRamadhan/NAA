@@ -688,7 +688,10 @@ def start_server(
     admin_key: str,
     model_cfg: Dict[str, str],
     preset: str = "default",
-    system_prompt: Optional[str] = None
+    system_prompt: Optional[str] = None,
+    llm_enabled: bool = True,
+    visual_enabled: bool = True,
+    **_extra: Any,
 ) -> bool:
     global _server_proc
     
@@ -728,10 +731,17 @@ def start_server(
         "NAA_PORT": str(PORT),
         "NAA_QUANT": str(model_cfg.get("quant", "auto")),
         "NAA_PRESET": preset,
+        "NAA_LLM": "1" if llm_enabled else "0",
+        "NAA_VISUAL": "1" if visual_enabled else "0",
         "PYTHONPATH": pythonpath,
     })
     if system_prompt:
         env["NAA_SYSTEM_PROMPT"] = system_prompt
+    # cmd_start already resolved NAA_LLM / NAA_VISUAL explicitly (including the
+    # legacy NAA_VIDEO_ONLY alias), so drop the legacy var here — otherwise a
+    # lingering NAA_VIDEO_ONLY=1 in the parent env would override explicit
+    # flags inside the child's Settings (see src/config.py).
+    env.pop("NAA_VIDEO_ONLY", None)
 
     # Keep only the current child run so a native crash's root error is not
     # pushed out of the diagnostic tail by several restart banners.
@@ -869,6 +879,9 @@ def _parse_cli_args(args: Optional[list]) -> Dict[str, Any]:
         "model": None,
         "preset": None,
         "system_prompt": None,
+        "llm": None,       # None = default on; True/False from --llm / --no-llm
+        "visual": None,    # None = default on; True/False from --visual / --no-visual
+        "visual_model": None,
     }
     if not args:
         return res
@@ -876,26 +889,54 @@ def _parse_cli_args(args: Optional[list]) -> Dict[str, Any]:
     i = 0
     while i < len(args):
         arg = args[i]
-        if arg in ("--model", "-m") and i + 1 < len(args):
+        low = arg.lower()
+        if low == "--llm":
+            res["llm"] = True
+            i += 1
+        elif low in ("--no-llm", "--no_llm"):
+            res["llm"] = False
+            i += 1
+        elif low in ("--visual", "--video", "--wan"):
+            res["visual"] = True
+            i += 1
+        elif low in ("--no-visual", "--no_visual", "--no-video", "--no_video"):
+            res["visual"] = False
+            i += 1
+        elif low in ("--visual-model", "--visual_model", "--video-model", "--video_model") and i + 1 < len(args):
+            res["visual_model"] = args[i + 1]
+            i += 2
+        elif low.startswith("--visual-model="):
+            res["visual_model"] = arg.split("=", 1)[1]
+            i += 1
+        elif low.startswith("--visual_model="):
+            res["visual_model"] = arg.split("=", 1)[1]
+            i += 1
+        elif low.startswith("--video-model="):
+            res["visual_model"] = arg.split("=", 1)[1]
+            i += 1
+        elif low.startswith("--video_model="):
+            res["visual_model"] = arg.split("=", 1)[1]
+            i += 1
+        elif low in ("--model", "-m") and i + 1 < len(args):
             res["model"] = args[i + 1]
             i += 2
-        elif arg.startswith("--model="):
+        elif low.startswith("--model="):
             res["model"] = arg.split("=", 1)[1]
             i += 1
-        elif arg in ("--preset", "-p") and i + 1 < len(args):
+        elif low in ("--preset", "-p") and i + 1 < len(args):
             res["preset"] = args[i + 1]
             i += 2
-        elif arg.startswith("--preset="):
+        elif low.startswith("--preset="):
             res["preset"] = arg.split("=", 1)[1]
             i += 1
-        elif arg in ("--system-prompt", "-s") and i + 1 < len(args):
+        elif low in ("--system-prompt", "-s") and i + 1 < len(args):
             res["system_prompt"] = args[i + 1]
             i += 2
-        elif arg.startswith("--system-prompt="):
+        elif low.startswith("--system-prompt="):
             res["system_prompt"] = arg.split("=", 1)[1]
             i += 1
-        elif arg in ("uncensored", "default") and res["preset"] is None:
-            res["preset"] = arg
+        elif low in ("uncensored", "default") and res["preset"] is None:
+            res["preset"] = low
             i += 1
         elif not arg.startswith("-") and res["model"] is None:
             res["model"] = arg
@@ -950,37 +991,98 @@ def cmd_start(args: list = None):
     state = load_state_fn()
     parsed = _parse_cli_args(args)
 
+    def _env_flag(name: str, default: bool) -> bool:
+        raw = os.environ.get(name, "")
+        if not raw:
+            return default
+        return raw.lower() not in ("0", "false", "no")
+
+    visual_model_arg = parsed.get("visual_model")
+    if visual_model_arg:
+        from src.core.video_engine import resolve_video_model_id as _resolve_vid
+
+        os.environ["NAA_VIDEO_MODEL_ID"] = _resolve_vid(visual_model_arg)
+        settings.video_model_id = os.environ["NAA_VIDEO_MODEL_ID"]
+
+    # Backend selection (`start` args):
+    #   plain `start`                -> both backends (backward compatible)
+    #   `start --llm`                -> LLM-only (chat/completions)
+    #   `start --visual`             -> visual-only (Wan video, skips LLM download/load)
+    #   `start --llm --visual`       -> both backends
+    #   `start <model> --llm`        -> LLM-only with that model
+    #   `start <model> --visual`     -> both (named LLM + visual)
+    #   `--no-llm` / `--no-visual`   -> disable one side explicitly
+    # Naming an LLM model alongside an explicit `--visual` counts as wanting
+    # both; on its own it just configures the LLM and keeps the default.
+    llm_flag = parsed.get("llm")
+    visual_flag = parsed.get("visual")
+    llm_explicit_model = bool(parsed.get("model"))
+    has_visual_model = bool(visual_model_arg)
+
+    if llm_flag is True or visual_flag is True or has_visual_model:
+        # Closed world: only the backends explicitly asked for come up.
+        # `--visual-model X` implies `--visual`. Naming an LLM model next
+        # to an explicit `--visual` counts as wanting both.
+        visual_enabled = (visual_flag is True) or has_visual_model
+        if visual_flag is False:
+            visual_enabled = False
+        llm_enabled = (llm_flag is True) or (llm_explicit_model and visual_enabled)
+        if llm_flag is False:
+            llm_enabled = False
+    else:
+        legacy_visual_only = os.environ.get("NAA_VIDEO_ONLY", "").lower() in ("1", "true", "yes")
+        llm_enabled = _env_flag("NAA_LLM", True) and llm_flag is not False and not legacy_visual_only
+        visual_enabled = _env_flag("NAA_VISUAL", True) and visual_flag is not False
+
+    if not llm_enabled and not visual_enabled:
+        err("Nothing to start: both --llm and --visual are disabled.")
+        return
+
+    os.environ["NAA_LLM"] = "1" if llm_enabled else "0"
+    os.environ["NAA_VISUAL"] = "1" if visual_enabled else "0"
+    settings.llm_enabled = llm_enabled
+    settings.visual_enabled = visual_enabled
+    visual_only = visual_enabled and not llm_enabled
+
     model_arg = parsed.get("model")
     preset_arg = parsed.get("preset") or state.get("preset", settings.preset)
     system_prompt_arg = parsed.get("system_prompt") or state.get("system_prompt", settings.system_prompt)
 
-    model_key = model_arg or state.get("model_key") or "auto"
-    model_path_str = state.get("model_path") if not model_arg else None
+    model_cfg: Dict[str, str] = {}
+    model_path = Path(state.get("model_path") or settings.model_path)
+    model_key = state.get("model_key") or "auto"
+    active_name = "Wan2.2-Visual (LLM off)"
 
-    model_cfg = choose_model_fn(auto=model_key)
-    _select_gguf_backend(model_cfg)
-    if model_cfg.get("file", "").endswith(".gguf") or model_cfg.get("quant", "").startswith("q"):
-        if not ensure_gguf_deps_fn():
-            err("GGUF backend setup failed; model startup was cancelled.")
-            return
+    if llm_enabled:
+        model_key = model_arg or state.get("model_key") or "auto"
+        model_path_str = state.get("model_path") if not model_arg else None
 
-    if model_path_str and Path(model_path_str).exists() and is_model_complete(Path(model_path_str), model_cfg):
-        model_path = Path(model_path_str)
+        model_cfg = choose_model_fn(auto=model_key)
+        _select_gguf_backend(model_cfg)
+        if model_cfg.get("file", "").endswith(".gguf") or model_cfg.get("quant", "").startswith("q"):
+            if not ensure_gguf_deps_fn():
+                err("GGUF backend setup failed; model startup was cancelled.")
+                return
+
+        if model_path_str and Path(model_path_str).exists() and is_model_complete(Path(model_path_str), model_cfg):
+            model_path = Path(model_path_str)
+        else:
+            filename = model_cfg.get("file", "model.safetensors.index.json")
+            if filename.endswith(".gguf"):
+                expected_path = MODEL_DIR / filename
+            else:
+                model_dir_name = model_cfg.get("dir", model_cfg.get("name", "model"))
+                expected_path = MODEL_DIR / model_dir_name
+
+            if is_model_complete(expected_path, model_cfg):
+                model_path = expected_path
+            else:
+                model_path = download_model_fn(model_cfg)
+
+        active_name = model_cfg.get("name", model_path.name)
+        print_banner(active_name)
     else:
-        filename = model_cfg.get("file", "model.safetensors.index.json")
-        if filename.endswith(".gguf"):
-            expected_path = MODEL_DIR / filename
-        else:
-            model_dir_name = model_cfg.get("dir", model_cfg.get("name", "model"))
-            expected_path = MODEL_DIR / model_dir_name
-
-        if is_model_complete(expected_path, model_cfg):
-            model_path = expected_path
-        else:
-            model_path = download_model_fn(model_cfg)
-
-    active_name = model_cfg.get("name", model_path.name)
-    print_banner(active_name)
+        print_banner("Wan2.2-Visual")
 
     admin_key = state.get("admin_key") or f"naa-{secrets.token_urlsafe(32)}"
     if not admin_key.startswith("naa-"):
@@ -991,21 +1093,33 @@ def cmd_start(args: list = None):
         "model_key": model_key,
         "model_path": str(model_path),
         "preset": preset_arg,
+        "llm_enabled": llm_enabled,
+        "visual_enabled": visual_enabled,
+        "visual_only": visual_only,
+        "visual_model": os.environ.get("NAA_VIDEO_MODEL_ID", settings.video_model_id),
     })
 
     header("Starting NAA API Server")
-    info(f"Model:  {active_name} ({model_path.name})")
-    info(f"Preset: {preset_arg}")
+    if llm_enabled:
+        info(f"LLM:    {active_name} ({model_path.name})")
+        info(f"Preset: {preset_arg}")
+    else:
+        info("LLM:    off (--visual)")
+    if visual_enabled:
+        info(f"Visual: Wan 2.2 ({os.environ.get('NAA_VIDEO_MODEL_ID', settings.video_model_id)})")
+    else:
+        info("Visual: off (--llm)")
     info(f"Port:   {PORT}")
 
     step(1, "Starting FastAPI server...")
-    started = start_server_fn(model_path, admin_key, model_cfg, preset=preset_arg, system_prompt=system_prompt_arg)
+    started = start_server_fn(model_path, admin_key, model_cfg, preset=preset_arg, system_prompt=system_prompt_arg, llm_enabled=llm_enabled, visual_enabled=visual_enabled)
     if not started:
         warn("Retrying server start...")
         _print_server_log_tail(30)
-        _apply_gguf_memory_recovery(model_path, 1)
+        if llm_enabled:
+            _apply_gguf_memory_recovery(model_path, 1)
         time.sleep(3)
-        started = start_server_fn(model_path, admin_key, model_cfg, preset=preset_arg, system_prompt=system_prompt_arg)
+        started = start_server_fn(model_path, admin_key, model_cfg, preset=preset_arg, system_prompt=system_prompt_arg, llm_enabled=llm_enabled, visual_enabled=visual_enabled)
     
     if started:
         ok(f"Server listening on port {PORT}")
@@ -1016,7 +1130,7 @@ def cmd_start(args: list = None):
 
     start_keepalive_fn(PORT)
 
-    step(2, "Waiting for model to load into memory/VRAM...")
+    step(2, "Waiting for visual backend..." if visual_only else "Waiting for model to load into memory/VRAM...")
     start_wait = time.time()
     spinners = ["|", "/", "-", "\\"]
     spin_idx = 0
@@ -1051,7 +1165,12 @@ def cmd_start(args: list = None):
             if not vram_info:
                 vram_info = f" (in {int(elapsed)}s)"
 
-            sys.stdout.write(f"\r\033[0m\033[32m[OK]   Model loaded and ready for inference!{vram_info}\033[K\n")
+            ready_msg = (
+                "Visual backend ready for video generation!"
+                if visual_only
+                else "Model loaded and ready for inference!"
+            )
+            sys.stdout.write(f"\r\033[0m\033[32m[OK]   {ready_msg}{vram_info}\033[K\n")
             sys.stdout.flush()
             break
 
@@ -1156,7 +1275,10 @@ def cmd_start(args: list = None):
     inner_w = max(58, max(len(public_url), len(admin_key), len(docs_url), len(api_base)) + 14)
     print("\n  +" + "-" * inner_w + "+")
     print(f"  |  {'NAA (Notebooks AI API) is LIVE':<{inner_w-3}} |")
-    print(f"  |  Model:     {active_name:<{inner_w-14}} |")
+    if llm_enabled:
+        print(f"  |  LLM:       {active_name:<{inner_w-14}} |")
+    if visual_enabled:
+        print(f"  |  Visual:    {os.environ.get('NAA_VIDEO_MODEL_ID', settings.video_model_id):<{inner_w-14}} |")
     print(f"  |  URL:       {public_url:<{inner_w-14}} |")
     print(f"  |  API Base:  {api_base:<{inner_w-14}} |")
     print(f"  |  Admin key: {admin_key:<{inner_w-14}} |")
@@ -1182,13 +1304,14 @@ def cmd_start(args: list = None):
                         current_server_proc.wait(timeout=5)
                     except Exception: pass
                 proc_restart_attempts += 1
-                if return_code in (-4, -6, -11):
+                if llm_enabled and return_code in (-4, -6, -11):
                     _repair_gguf_cuda_backend()
-                _apply_gguf_memory_recovery(
-                    model_path,
-                    proc_restart_attempts,
-                    return_code=return_code,
-                )
+                if llm_enabled:
+                    _apply_gguf_memory_recovery(
+                        model_path,
+                        proc_restart_attempts,
+                        return_code=return_code,
+                    )
                 if proc_restart_attempts > 5:
                     err("Server crashed repeatedly; stopping instead of hiding an endless restart loop.")
                     current_tunnel_proc = _get_attr("_tunnel_proc", _tunnel_proc)
@@ -1204,6 +1327,8 @@ def cmd_start(args: list = None):
                     model_cfg,
                     preset=preset_arg,
                     system_prompt=system_prompt_arg,
+                    llm_enabled=llm_enabled,
+                    visual_enabled=visual_enabled,
                 )
 
             if is_server_healthy_fn(PORT):
@@ -1222,7 +1347,8 @@ def cmd_start(args: list = None):
                     warn("Sustained health failure — restarting server.")
                     proc_restart_attempts += 1
                     _print_server_log_tail(40)
-                    _apply_gguf_memory_recovery(model_path, proc_restart_attempts)
+                    if llm_enabled:
+                        _apply_gguf_memory_recovery(model_path, proc_restart_attempts)
                     # Re-fetch the proc reference; it may have changed if the
                     # server was already restarted in this loop iteration.
                     stale_proc = _get_attr("_server_proc", _server_proc)
@@ -1237,6 +1363,8 @@ def cmd_start(args: list = None):
                         model_cfg,
                         preset=preset_arg,
                         system_prompt=system_prompt_arg,
+                        llm_enabled=llm_enabled,
+                        visual_enabled=visual_enabled,
                     )
                     health_miss_streak = 0
 
@@ -1317,7 +1445,16 @@ def cmd_status(args: list = None):
     print(f"  Service:   NAA (Notebooks AI API)")
     print(f"  URL:       {state.get('public_url', 'Not started')}")
     print(f"  Admin Key: {admin_key or 'Not set'}")
-    print(f"  Model:     {state.get('model_name', MODEL_NAME)} ({state.get('model_key', 'auto')})")
+    llm_on = state.get("llm_enabled", True)
+    visual_on = state.get("visual_enabled", True)
+    if llm_on:
+        print(f"  LLM:       {state.get('model_name', MODEL_NAME)} ({state.get('model_key', 'auto')})")
+    else:
+        print(f"  LLM:       off (visual-only)")
+    if visual_on:
+        print(f"  Visual:    {state.get('visual_model', settings.video_model_id)}")
+    else:
+        print(f"  Visual:    off (LLM-only)")
     if admin_key:
         data = api_call("GET", "/health", admin_key)
         if data:
@@ -1386,10 +1523,25 @@ def cmd_video(args: list = None):
             print(_json.dumps(data, indent=2))
             mode = "image-to-video" if image else "text-to-video"
             ok(f"Submitted {mode} job {data.get('id')}. Poll: GET /v1/videos/{data.get('id')}")
+    elif sub in ("start", "serve", "up"):
+        # Boot the server with the visual backend (`start --visual`, plus any
+        # extra flags the user passed, e.g. `video start --visual-model ...`).
+        # Forward the full rest (not just dash-tokens) so `--visual-model X`
+        # keeps its value; ensure an explicit --visual is present.
+        target = list(rest) if rest else ["--visual"]
+        lowered = [t.lower() for t in target]
+        if not any(t in ("--visual", "--video", "--wan") for t in lowered):
+            target = ["--visual"] + target
+        info(f"Starting server (equivalent to: python naa.py start {' '.join(target)})...")
+        cmd_start(target)
     else:
         print("Usage:")
         print("  python naa.py video setup [--model Wan-AI/Wan2.2-TI2V-5B-Diffusers]")
+        print("  python naa.py video start                       # visual-only server (no LLM)")
         print("  python naa.py video generate --prompt \"...\" [--image path|url|base64]")
+        print("")
+        print("  Tip: `python naa.py start --visual` boots visual-only;")
+        print("       `python naa.py start --llm` boots LLM-only (add --model ... for the LLM).")
 
 
 COMMANDS = {

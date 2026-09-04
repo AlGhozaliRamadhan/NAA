@@ -40,7 +40,7 @@ def test_502_prevention_startup_sequencing_and_watchdog(tmp_path: Path, monkeypa
     monkeypatch.setattr(naa, "_download_cloudflared", lambda: "/tmp/cloudflared")
     monkeypatch.setattr(naa, "download_model", lambda model: fake_model_file)
 
-    def fake_start_server(model_path, admin_key, model_cfg, preset="default", system_prompt=None):
+    def fake_start_server(model_path, admin_key, model_cfg, preset="default", system_prompt=None, **_extra):
         proc = FakeProc(calls)
         naa._server_proc = proc
         calls.append(("start_server",))

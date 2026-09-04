@@ -94,3 +94,39 @@ def test_parse_cli_args():
     assert res5["model"] is None
     assert res5["preset"] == "uncensored"
 
+
+def test_parse_cli_args_backend_flags():
+    # Case-insensitive --LLM / --VISUAL (Kaggle cells use uppercase)
+    res = cli._parse_cli_args(["--LLM"])
+    assert res["llm"] is True
+    assert res["visual"] is None
+
+    res = cli._parse_cli_args(["--VISUAL"])
+    assert res["visual"] is True
+
+    res = cli._parse_cli_args(["--llm", "--visual"])
+    assert res["llm"] is True
+    assert res["visual"] is True
+
+    res = cli._parse_cli_args(["--no-llm"])
+    assert res["llm"] is False
+
+    res = cli._parse_cli_args(["--no-visual"])
+    assert res["visual"] is False
+
+    # --visual-model implies visual backend + keeps its value
+    res = cli._parse_cli_args(["--visual-model", "Wan-AI/Wan2.2-T2V-A14B-Diffusers"])
+    assert res["visual_model"] == "Wan-AI/Wan2.2-T2V-A14B-Diffusers"
+
+    res = cli._parse_cli_args(["--video-model=wan2.2"])
+    assert res["visual_model"] == "wan2.2"
+
+    # --video / --wan are aliases for --visual
+    assert cli._parse_cli_args(["--video"])["visual"] is True
+    assert cli._parse_cli_args(["--wan"])["visual"] is True
+
+    # LLM model + backend flag coexist (model configures LLM side)
+    res = cli._parse_cli_args(["4bit", "--visual"])
+    assert res["model"] == "4bit"
+    assert res["visual"] is True
+

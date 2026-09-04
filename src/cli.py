@@ -206,11 +206,19 @@ def download_video_model(model_id: Optional[str] = None) -> Path:
     try:
         from huggingface_hub import snapshot_download
 
+        # NOTE: no `local_dir_use_symlinks=False` on purpose. With symlinks
+        # (the default) local_dir just links into the HF cache = 1 copy on
+        # disk. With False, snapshot_download copies every byte, so the
+        # ~32 GB Wan checkpoint needs ~64 GB mid-download and Kaggle dies
+        # with `os error 28` (no space left). Junk files are skipped too.
         kwargs: Dict[str, Any] = {
             "repo_id": target,
             "local_dir": str(MODEL_DIR / target.split("/")[-1]),
-            "local_dir_use_symlinks": False,
             "tqdm_class": NotebookProgressBar,
+            "ignore_patterns": [
+                "assets/*", "examples/*",
+                "*.png", "*.PNG", "*.jpg", "*.JPG", "*.jpeg", "*.md",
+            ],
         }
         hf_token = os.environ.get("HF_TOKEN")
         if hf_token:
@@ -221,6 +229,10 @@ def download_video_model(model_id: Optional[str] = None) -> Path:
         err(f"Video model download failed: {e}")
         sys.exit(1)
 
+    # Hard requirement: the LoRA set is ALWAYS lkzd7/WAN2.2_LoraSet_NSFW
+    # unless the user explicitly overrides NAA_VIDEO_LORA_URL. Never swap it
+    # for anything else. (It is a LoRA add-on, not a base model — it loads on
+    # top of the Wan checkpoint at generation time.)
     lora_repo = parse_lora_repo(os.environ.get("NAA_VIDEO_LORA_URL", DEFAULT_VIDEO_LORA_URL))
     if lora_repo:
         info(f"Pre-fetching video LoRA: {lora_repo}")
@@ -228,7 +240,7 @@ def download_video_model(model_id: Optional[str] = None) -> Path:
             from huggingface_hub import snapshot_download as _snap
 
             _snap(repo_id=lora_repo, local_dir=str(MODEL_DIR / lora_repo.split("/")[-1]),
-                  local_dir_use_symlinks=False, tqdm_class=NotebookProgressBar)
+                  tqdm_class=NotebookProgressBar)
             ok(f"Video LoRA ready: {lora_repo}")
         except Exception as e:
             warn(f"Video LoRA prefetch failed (will retry at generation time): {e}")

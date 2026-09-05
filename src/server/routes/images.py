@@ -13,10 +13,16 @@ import base64
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from starlette.concurrency import run_in_threadpool
 
-from src.core.image_engine import get_image_engine, is_flux_model, resolve_image_model_id
+from src.core.image_engine import (
+    ImageEditUnsupportedError,
+    decode_reference_image,
+    get_image_engine,
+    is_flux_model,
+    resolve_image_model_id,
+)
 from src.server.auth import get_api_key
 from src.server.schemas import ImageGenerationRequest
 
@@ -82,19 +88,59 @@ async def create_image_generation(
     n = max(1, min(4, body.n or 1))
     default_guidance = 3.5 if getattr(engine, "is_flux", False) else 5.0
     guidance = body.guidance_scale if body.guidance_scale is not None else default_guidance
+    # Cogito edit shape: generation_mode="edit" + reference_images. Any
+    # reference images mean an edit request; decode to bytes now so the 400
+    # for excess/undecodable refs fires before rendering.
+    refs: List[bytes] = []
+    if body.reference_images:
+        # Any reference images mean an edit request, whether or not the
+        # client also set generation_mode="edit". Fail fast on the
+        # discovered capabilities rather than after a render.
+        caps = engine.refresh_capabilities()
+        if not caps.image_edit:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Model '{engine.model_id}' does not support image editing: "
+                    "/v1/models reports image_edit=false for this backend."
+                ),
+            )
+        limit = max(0, caps.max_reference_images)
+        if len(body.reference_images) > limit:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Got {len(body.reference_images)} reference image(s) but model "
+                    f"'{engine.model_id}' supports at most {limit}."
+                ),
+            )
+        try:
+            refs = [decode_reference_image(r.model_dump()) for r in body.reference_images]
+        except ImageEditUnsupportedError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            )
     data: List[Dict[str, Any]] = []
     for _ in range(n):
         # SDXL render blocks for seconds — keep it off the event loop.
-        png = await run_in_threadpool(
-            engine.generate,
-            body.prompt,
-            body.negative_prompt,
-            width,
-            height,
-            body.num_inference_steps,
-            guidance,
-            body.seed,
-        )
+        # Engine.generate maps refs to the runner's image input and raises
+        # ImageEditUnsupportedError (→ 400) when the runner has no image path.
+        try:
+            png = await run_in_threadpool(
+                engine.generate,
+                body.prompt,
+                body.negative_prompt,
+                width,
+                height,
+                body.num_inference_steps,
+                guidance,
+                body.seed,
+                refs or None,
+            )
+        except ImageEditUnsupportedError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+            )
         data.append(
             {
                 "b64_json": base64.b64encode(png).decode(),

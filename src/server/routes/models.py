@@ -59,32 +59,31 @@ def _make_alias(alias_id: str, root: str, display: str) -> Dict[str, Any]:
 @router.get("/models")
 async def list_models(request: Request, kd: Dict[str, Any] = Depends(get_api_key)):
     if not getattr(request.app.state, "llm_enabled", True):
-        # Visual-only: advertise the Wan video checkpoints and the SDXL image
-        # checkpoint so image/chat clients can pick a usable model id.
-        from src.core.video_engine import VIDEO_MODEL_ALIASES, get_video_engine
+        # Visual-only: Cogito media discovery. Capabilities come from the
+        # live runner (discover_image_capabilities), never from model ids —
+        # an id containing "flux"/"fp8" says nothing about edit or video.
+        from src.core.video_engine import get_video_engine
         from src.core.image_engine import get_image_engine
 
         video = getattr(request.app.state, "video_engine", None) or get_video_engine()
         image = getattr(request.app.state, "image_engine", None) or get_image_engine()
-        seen: List[Dict[str, Any]] = []
-        from src.core.image_engine import IMAGE_MODEL_ALIASES
-
-        for mid, owned_by, caps in [
-            (video.model_id, "naa-video", ["text-to-video", "image-to-video"]),
-            (image.model_id, "naa-image", ["text-to-image"]),
-            *((m, "naa-video", ["text-to-video", "image-to-video"]) for m in VIDEO_MODEL_ALIASES.values()),
-            *((m, "naa-image", ["text-to-image"]) for m in IMAGE_MODEL_ALIASES.values()),
-        ]:
-            if mid and all(m["id"] != mid for m in seen):
-                seen.append(
-                    {
-                        "id": mid,
-                        "object": "model",
-                        "created": 1700000000,
-                        "owned_by": owned_by,
-                        "capabilities": caps,
-                    }
-                )
+        video_available = video is not None and not getattr(video, "is_mock", True)
+        caps = image.refresh_capabilities(video_available=video_available)
+        seen: List[Dict[str, Any]] = [
+            {
+                "id": image.model_id,
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "naa",
+                "label": image.label,
+                "capabilities": {
+                    "image_generation": caps.image_generation,
+                    "image_edit": caps.image_edit,
+                    "video_generation": caps.video_generation,
+                    "max_reference_images": caps.max_reference_images,
+                },
+            }
+        ]
         return {"object": "list", "data": seen}
 
     engine = getattr(request.app.state, "engine", None)

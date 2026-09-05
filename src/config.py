@@ -176,6 +176,9 @@ class Settings:
     sse_heartbeat_secs: float = float(os.environ.get("NAA_SSE_HEARTBEAT", os.environ.get("SSE_HEARTBEAT_SECS", "5.0")))
     model_wait_timeout_secs: float = float(os.environ.get("NAA_MODEL_WAIT_TIMEOUT", "600.0"))
     trust_remote_code: bool = os.environ.get("NAA_TRUST_REMOTE_CODE", "1").lower() in ("1", "true", "yes")
+    # Still-image backend: SDXL/Juggernaut-XL default, FLUX.1-dev-FP8 optional
+    # (select via --image-model flux / --visual=flux or NAA_IMAGE_MODEL_ID).
+    image_model_id: str = os.environ.get("NAA_IMAGE_MODEL_ID", "RunDiffusion/Juggernaut-XL-v9")
     # Wan 2.2 video generation defaults (backend testing configuration)
     video_model_id: str = os.environ.get("NAA_VIDEO_MODEL_ID", "Wan-AI/Wan2.2-TI2V-5B-Diffusers")
     video_lora_url: str = os.environ.get(

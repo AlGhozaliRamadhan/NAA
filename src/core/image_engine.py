@@ -33,6 +33,55 @@ DEFAULT_IMAGE_CHECKPOINT_FILE = os.environ.get(
     "NAA_IMAGE_CHECKPOINT_FILE",
     "Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors",
 )
+# FLUX.1-dev-FP8 alternative (kept separate so the Juggernaut default never
+# changes unless explicitly requested). The FP8 repo holds a single
+# transformer checkpoint (~12 GB) loaded on top of the FLUX.1-dev pipeline.
+DEFAULT_FLUX_MODEL_ID = os.environ.get(
+    "NAA_FLUX_MODEL_ID", "black-forest-labs/FLUX.1-dev-FP8"
+)
+DEFAULT_FLUX_CHECKPOINT_FILE = os.environ.get(
+    "NAA_FLUX_CHECKPOINT_FILE",
+    "flux1-dev-fp8.safetensors",
+)
+# Base FLUX pipeline repo used for tokenizer/encoders/scheduler when running
+# the FP8 transformer. Gated — requires HF_TOKEN with license accepted.
+FLUX_BASE_REPO = os.environ.get("NAA_FLUX_BASE_REPO", "black-forest-labs/FLUX.1-dev")
+
+# Friendly aliases so `--image-model flux` (or flux.1, flux-fp8, ...) selects
+# the FLUX backend without typing the full HuggingFace repo id.
+IMAGE_MODEL_ALIASES: Dict[str, str] = {
+    "flux": DEFAULT_FLUX_MODEL_ID,
+    "flux.1": DEFAULT_FLUX_MODEL_ID,
+    "flux-dev": DEFAULT_FLUX_MODEL_ID,
+    "flux.1-dev": DEFAULT_FLUX_MODEL_ID,
+    "flux-fp8": DEFAULT_FLUX_MODEL_ID,
+    "flux.1-dev-fp8": DEFAULT_FLUX_MODEL_ID,
+    "flux-fp8-dev": DEFAULT_FLUX_MODEL_ID,
+    "flux-dev-fp8": DEFAULT_FLUX_MODEL_ID,
+    "juggernaut": DEFAULT_IMAGE_MODEL_ID,
+    "juggernaut-xl": DEFAULT_IMAGE_MODEL_ID,
+    "juggernaut-v9": DEFAULT_IMAGE_MODEL_ID,
+    "juggernaut-xl-v9": DEFAULT_IMAGE_MODEL_ID,
+    "sdxl": DEFAULT_IMAGE_MODEL_ID,
+    "sdxl-juggernaut": DEFAULT_IMAGE_MODEL_ID,
+}
+
+
+def resolve_image_model_id(model: Optional[str]) -> str:
+    """Resolve a friendly alias (``flux``) to a HuggingFace image model id."""
+    if not model:
+        return DEFAULT_IMAGE_MODEL_ID
+    key = model.strip()
+    return IMAGE_MODEL_ALIASES.get(key.lower(), key)
+
+
+def is_flux_model(model_id: Optional[str]) -> bool:
+    """True when the model id selects the FLUX.1 transformer backend."""
+    return "flux" in (model_id or "").lower()
+
+
+DEFAULT_FLUX_STEPS = int(os.environ.get("NAA_FLUX_STEPS", "28"))
+DEFAULT_FLUX_GUIDANCE = float(os.environ.get("NAA_FLUX_GUIDANCE", "3.5"))
 DEFAULT_IMAGE_STEPS = int(os.environ.get("NAA_IMAGE_STEPS", "25"))
 DEFAULT_IMAGE_GUIDANCE = float(os.environ.get("NAA_IMAGE_GUIDANCE", "5.0"))
 DEFAULT_IMAGE_WIDTH = int(os.environ.get("NAA_IMAGE_WIDTH", "1024"))
@@ -89,7 +138,7 @@ class ImageJob:
 
 
 class ImageEngine:
-    """Lazy-loaded SDXL/Juggernaut backend.
+    """Lazy-loaded still-image backend (SDXL/Juggernaut default, FLUX optional).
 
     The pipeline is constructed on first request, not at server startup, so
     importing this module doesn't force a model download or GPU allocation.
@@ -108,7 +157,17 @@ class ImageEngine:
     ):
         from src.config import WORK_DIR
 
-        self.model_id = model_id
+        self.model_id = resolve_image_model_id(model_id)
+        self.is_flux = is_flux_model(self.model_id)
+        # Pick the matching default checkpoint/steps unless the caller pinned
+        # one explicitly (env var or argument differing from the SDXL default).
+        if self.is_flux:
+            if checkpoint_file == DEFAULT_IMAGE_CHECKPOINT_FILE:
+                checkpoint_file = DEFAULT_FLUX_CHECKPOINT_FILE
+            if steps == DEFAULT_IMAGE_STEPS:
+                steps = DEFAULT_FLUX_STEPS
+            if guidance == DEFAULT_IMAGE_GUIDANCE:
+                guidance = DEFAULT_FLUX_GUIDANCE
         self.checkpoint_file = checkpoint_file
         self.output_dir = Path(output_dir) if output_dir else (Path(WORK_DIR) / "images")
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -128,6 +187,8 @@ class ImageEngine:
             return self._pipe
         if self._mock_mode:
             return None
+        if self.is_flux:
+            return self._ensure_flux_pipeline()
         try:
             import torch
             from diffusers import StableDiffusionXLPipeline
@@ -174,6 +235,56 @@ class ImageEngine:
             self._mock_mode = True
             return None
 
+    def _ensure_flux_pipeline(self) -> Optional[Any]:
+        """Load the FLUX.1-dev-FP8 transformer on top of the base pipeline."""
+        try:
+            import torch
+            from diffusers import FluxPipeline, FluxTransformer2DModel
+            from huggingface_hub import hf_hub_download
+        except ImportError as exc:
+            logger.warning("diffusers/torch missing (%s); image backend in mock mode.", exc)
+            self._mock_mode = True
+            return None
+
+        try:
+            logger.info(
+                "Loading FLUX.1-dev-FP8 transformer %s/%s",
+                self.model_id, self.checkpoint_file,
+            )
+            ckpt_path = hf_hub_download(
+                repo_id=self.model_id,
+                filename=self.checkpoint_file,
+            )
+            # FP8 transformer weights run best in bfloat16 compute precision.
+            pipe = FluxPipeline.from_pretrained(
+                FLUX_BASE_REPO,
+                transformer=FluxTransformer2DModel.from_single_file(
+                    ckpt_path,
+                    torch_dtype=torch.bfloat16,
+                ),
+                torch_dtype=torch.bfloat16,
+            )
+            try:
+                # Keeps the 12B transformer usable on a T4 / Kaggle GPU.
+                pipe.enable_model_cpu_offload()
+            except Exception:
+                try:
+                    device = "cuda" if torch.cuda.is_available() else "cpu"
+                    pipe.to(device)
+                except Exception as exc:
+                    logger.warning("flux pipe.to failed: %s", exc)
+            self._pipe = pipe
+            logger.info("FLUX.1-dev-FP8 pipeline ready")
+            return pipe
+        except Exception as exc:
+            logger.error("Failed to load FLUX pipeline %s: %s", self.model_id, exc, exc_info=True)
+            logger.warning(
+                "FLUX.1-dev is a gated repo — set HF_TOKEN with the license "
+                "accepted on HuggingFace, else the image backend stays in mock mode."
+            )
+            self._mock_mode = True
+            return None
+
     # -- public API --------------------------------------------------------
     def generate(
         self,
@@ -216,14 +327,21 @@ class ImageEngine:
             "guidance_scale": cfg,
             "generator": generator,
         }
-        if negative_prompt:
+        # FLUX has no negative-prompt input and expects dims divisible by 16.
+        if self.is_flux:
+            call_kwargs["width"] = (w // 16) * 16
+            call_kwargs["height"] = (h // 16) * 16
+        elif negative_prompt:
             call_kwargs["negative_prompt"] = negative_prompt
 
         try:
             result = pipe(**call_kwargs)
             image = result.images[0]
         except Exception as exc:
-            logger.error("SDXL generation failed: %s", exc, exc_info=True)
+            logger.error(
+                "%s generation failed: %s",
+                "FLUX" if self.is_flux else "SDXL", exc, exc_info=True,
+            )
             raise
 
         buf = io.BytesIO()

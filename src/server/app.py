@@ -38,10 +38,13 @@ def create_app(
     llm_enabled: bool = None,
     visual_enabled: bool = None,
 ) -> FastAPI:
+    from src.core.image_engine import resolve_image_model_id as _resolve_img
+
     if llm_enabled is None:
         llm_enabled = settings.llm_enabled
     if visual_enabled is None:
         visual_enabled = settings.visual_enabled
+    settings.image_model_id = _resolve_img(settings.image_model_id)
     # Visual-only: LLM disabled (e.g. `start --visual` without `--llm`).
     visual_only = not llm_enabled and visual_enabled
     if not llm_enabled and not visual_enabled:
@@ -97,6 +100,11 @@ def create_app(
         redoc_url="/redoc",
         lifespan=lifespan,
     )
+
+    if image_engine is None and visual_enabled:
+        from src.core.image_engine import get_image_engine
+
+        image_engine = get_image_engine(model_id=settings.image_model_id)
 
     app.state.engine = engine
     app.state.key_manager = key_manager

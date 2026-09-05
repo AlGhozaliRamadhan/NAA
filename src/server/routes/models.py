@@ -67,10 +67,13 @@ async def list_models(request: Request, kd: Dict[str, Any] = Depends(get_api_key
         video = getattr(request.app.state, "video_engine", None) or get_video_engine()
         image = getattr(request.app.state, "image_engine", None) or get_image_engine()
         seen: List[Dict[str, Any]] = []
+        from src.core.image_engine import IMAGE_MODEL_ALIASES
+
         for mid, owned_by, caps in [
             (video.model_id, "naa-video", ["text-to-video", "image-to-video"]),
             (image.model_id, "naa-image", ["text-to-image"]),
             *((m, "naa-video", ["text-to-video", "image-to-video"]) for m in VIDEO_MODEL_ALIASES.values()),
+            *((m, "naa-image", ["text-to-image"]) for m in IMAGE_MODEL_ALIASES.values()),
         ]:
             if mid and all(m["id"] != mid for m in seen):
                 seen.append(

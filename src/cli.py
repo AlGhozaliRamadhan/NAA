@@ -250,19 +250,35 @@ def download_image_model(
     model_id: Optional[str] = None,
     checkpoint_file: Optional[str] = None,
 ) -> Path:
-    """Pre-download a single-file SDXL/Juggernaut-XL checkpoint.
+    """Pre-download a still-image checkpoint (Juggernaut default, FLUX optional).
 
     Diffusers on PyPI (>=0.32.0) supports ``StableDiffusionXLPipeline.
     from_single_file`` natively, so no source install is required. We pull
-    just the one ``.safetensors`` file (~7 GB) rather than the full repo to
-    keep disk usage low on Kaggle/T4.
+    just the one ``.safetensors`` file rather than the full repo to keep disk
+    usage low on Kaggle/T4. For FLUX this is the ~12 GB FP8 transformer; the
+    base ``black-forest-labs/FLUX.1-dev`` pipeline files download lazily at
+    first generation (gated repo — needs HF_TOKEN with the license accepted).
     """
-    from src.core.image_engine import DEFAULT_IMAGE_CHECKPOINT_FILE, DEFAULT_IMAGE_MODEL_ID
-
-    target = model_id or os.environ.get("NAA_IMAGE_MODEL_ID", DEFAULT_IMAGE_MODEL_ID)
-    file_name = checkpoint_file or os.environ.get(
-        "NAA_IMAGE_CHECKPOINT_FILE", DEFAULT_IMAGE_CHECKPOINT_FILE
+    from src.core.image_engine import (
+        DEFAULT_FLUX_CHECKPOINT_FILE,
+        DEFAULT_IMAGE_CHECKPOINT_FILE,
+        DEFAULT_IMAGE_MODEL_ID,
+        is_flux_model,
+        resolve_image_model_id,
     )
+
+    target = resolve_image_model_id(
+        model_id or os.environ.get("NAA_IMAGE_MODEL_ID", DEFAULT_IMAGE_MODEL_ID)
+    )
+    if is_flux_model(target):
+        default_file = os.environ.get(
+            "NAA_FLUX_CHECKPOINT_FILE", DEFAULT_FLUX_CHECKPOINT_FILE
+        )
+    else:
+        default_file = os.environ.get(
+            "NAA_IMAGE_CHECKPOINT_FILE", DEFAULT_IMAGE_CHECKPOINT_FILE
+        )
+    file_name = checkpoint_file or default_file
     header(f"Downloading Image Model ({target} :: {file_name})")
     try:
         from huggingface_hub import hf_hub_download
@@ -784,6 +800,7 @@ def start_server(
         "NAA_PRESET": preset,
         "NAA_LLM": "1" if llm_enabled else "0",
         "NAA_VISUAL": "1" if visual_enabled else "0",
+        "NAA_IMAGE_MODEL_ID": os.environ.get("NAA_IMAGE_MODEL_ID", settings.image_model_id),
         "PYTHONPATH": pythonpath,
     })
     if system_prompt:
@@ -933,6 +950,7 @@ def _parse_cli_args(args: Optional[list]) -> Dict[str, Any]:
         "llm": None,       # None = default on; True/False from --llm / --no-llm
         "visual": None,    # None = default on; True/False from --visual / --no-visual
         "visual_model": None,
+        "image_model": None,
     }
     if not args:
         return res
@@ -949,6 +967,14 @@ def _parse_cli_args(args: Optional[list]) -> Dict[str, Any]:
             i += 1
         elif low in ("--visual", "--video", "--wan"):
             res["visual"] = True
+            i += 1
+        elif low.startswith("--visual=") or low.startswith("--video=") or low.startswith("--wan="):
+            # `--visual=flux` (or flux.1 / full repo): enable visual and pick
+            # the image backend in one flag.
+            res["visual"] = True
+            val = arg.split("=", 1)[1]
+            if val and val.lower() not in ("1", "true", "yes", "on"):
+                res["image_model"] = val
             i += 1
         elif low in ("--no-visual", "--no_visual", "--no-video", "--no_video"):
             res["visual"] = False
@@ -967,6 +993,15 @@ def _parse_cli_args(args: Optional[list]) -> Dict[str, Any]:
             i += 1
         elif low.startswith("--video_model="):
             res["visual_model"] = arg.split("=", 1)[1]
+            i += 1
+        elif low in ("--image-model", "--image_model", "--image") and i + 1 < len(args):
+            res["image_model"] = args[i + 1]
+            i += 2
+        elif low.startswith("--image-model="):
+            res["image_model"] = arg.split("=", 1)[1]
+            i += 1
+        elif low.startswith("--image_model="):
+            res["image_model"] = arg.split("=", 1)[1]
             i += 1
         elif low in ("--model", "-m") and i + 1 < len(args):
             res["model"] = args[i + 1]
@@ -989,8 +1024,14 @@ def _parse_cli_args(args: Optional[list]) -> Dict[str, Any]:
         elif low in ("uncensored", "default") and res["preset"] is None:
             res["preset"] = low
             i += 1
-        elif not arg.startswith("-") and res["model"] is None:
-            res["model"] = arg
+        elif not arg.startswith("-"):
+            # Bare image-like token (`--visual flux.1`, `start flux`, full
+            # repo ids) selects the image backend, not the LLM model.
+            low_is_image = ("flux" in low or "juggernaut" in low or "sdxl" in low)
+            if low_is_image and res["image_model"] is None:
+                res["image_model"] = arg
+            elif res["model"] is None:
+                res["model"] = arg
             i += 1
         else:
             i += 1
@@ -1055,6 +1096,13 @@ def cmd_start(args: list = None):
         os.environ["NAA_VIDEO_MODEL_ID"] = _resolve_vid(visual_model_arg)
         settings.video_model_id = os.environ["NAA_VIDEO_MODEL_ID"]
 
+    image_model_arg = parsed.get("image_model")
+    if image_model_arg:
+        from src.core.image_engine import resolve_image_model_id as _resolve_img
+
+        os.environ["NAA_IMAGE_MODEL_ID"] = _resolve_img(image_model_arg)
+        settings.image_model_id = os.environ["NAA_IMAGE_MODEL_ID"]
+
     # Backend selection (`start` args):
     #   plain `start`                -> both backends (backward compatible)
     #   `start --llm`                -> LLM-only (chat/completions)
@@ -1069,12 +1117,13 @@ def cmd_start(args: list = None):
     visual_flag = parsed.get("visual")
     llm_explicit_model = bool(parsed.get("model"))
     has_visual_model = bool(visual_model_arg)
+    has_image_model = bool(image_model_arg)
 
-    if llm_flag is True or visual_flag is True or has_visual_model:
+    if llm_flag is True or visual_flag is True or has_visual_model or has_image_model:
         # Closed world: only the backends explicitly asked for come up.
-        # `--visual-model X` implies `--visual`. Naming an LLM model next
-        # to an explicit `--visual` counts as wanting both.
-        visual_enabled = (visual_flag is True) or has_visual_model
+        # `--visual-model X` / `--image-model X` imply `--visual`. Naming an
+        # LLM model next to an explicit `--visual` counts as wanting both.
+        visual_enabled = (visual_flag is True) or has_visual_model or has_image_model
         if visual_flag is False:
             visual_enabled = False
         llm_enabled = (llm_flag is True) or (llm_explicit_model and visual_enabled)
@@ -1102,7 +1151,7 @@ def cmd_start(args: list = None):
     model_cfg: Dict[str, str] = {}
     model_path = Path(state.get("model_path") or settings.model_path)
     model_key = state.get("model_key") or "auto"
-    active_name = "Wan2.2-Visual (LLM off)"
+    active_name = "SDXL/Juggernaut-XL Visual (LLM off)"
 
     if llm_enabled:
         model_key = model_arg or state.get("model_key") or "auto"
@@ -1133,8 +1182,9 @@ def cmd_start(args: list = None):
         active_name = model_cfg.get("name", model_path.name)
         print_banner(active_name)
     else:
-        print_banner("Wan2.2-Visual")
+        print_banner("SDXL/Juggernaut-XL Visual")
 
+    image_model_id = os.environ.get("NAA_IMAGE_MODEL_ID", settings.image_model_id)
     admin_key = state.get("admin_key") or f"naa-{secrets.token_urlsafe(32)}"
     if not admin_key.startswith("naa-"):
         admin_key = f"naa-{admin_key}"
@@ -1148,6 +1198,7 @@ def cmd_start(args: list = None):
         "visual_enabled": visual_enabled,
         "visual_only": visual_only,
         "visual_model": os.environ.get("NAA_VIDEO_MODEL_ID", settings.video_model_id),
+        "image_model": image_model_id,
     })
 
     header("Starting NAA API Server")
@@ -1157,7 +1208,7 @@ def cmd_start(args: list = None):
     else:
         info("LLM:    off (--visual)")
     if visual_enabled:
-        info(f"Visual: Wan 2.2 ({os.environ.get('NAA_VIDEO_MODEL_ID', settings.video_model_id)})")
+        info(f"Visual: {image_model_id} (image) + {os.environ.get('NAA_VIDEO_MODEL_ID', settings.video_model_id)} (video)")
     else:
         info("Visual: off (--llm)")
     info(f"Port:   {PORT}")
@@ -1503,7 +1554,8 @@ def cmd_status(args: list = None):
     else:
         print(f"  LLM:       off (visual-only)")
     if visual_on:
-        print(f"  Visual:    {state.get('visual_model', settings.video_model_id)}")
+        print(f"  Visual:    {state.get('image_model', settings.image_model_id)} (image)")
+        print(f"             {state.get('visual_model', settings.video_model_id)} (video)")
     else:
         print(f"  Visual:    off (LLM-only)")
     if admin_key:
@@ -1597,13 +1649,13 @@ def cmd_video(args: list = None):
 
 
 def cmd_image(args: list = None):
-    """Manage SDXL/Juggernaut-XL still-image backend: download checkpoint."""
-    print_banner("SDXL-Image")
+    """Manage the still-image backend: download checkpoint (Juggernaut/FLUX)."""
+    print_banner("Image")
     sub = (args or ["help"])[0].lower() if args else "help"
     rest = (args or [])[1:]
 
     if sub in ("setup", "install", "download"):
-        # SDXL uses stable diffusers (>=0.32.0) from PyPI — already in
+        # SDXL/FLUX use stable diffusers (>=0.32.0) from PyPI — already in
         # requirements.txt. Just pre-fetch the checkpoint file.
         model_id = None
         checkpoint = None
@@ -1618,13 +1670,15 @@ def cmd_image(args: list = None):
                 checkpoint = tok.split("=", 1)[1]
         download_image_model(model_id, checkpoint)
         ok("Image setup complete! The server exposes POST /v1/images/generations")
-        ok("(OpenAI-compatible stills backed by SDXL/Juggernaut-XL).")
+        ok("(OpenAI-compatible stills: SDXL/Juggernaut-XL default, FLUX.1-dev-FP8 optional).")
     else:
         print("Usage:")
         print("  python naa.py image setup [--model RunDiffusion/Juggernaut-XL-v9]")
         print("                            [--file Juggernaut-XL_v9_RunDiffusionPhoto_v2.safetensors]")
+        print("  python naa.py image setup --model flux   # FLUX.1-dev-FP8 transformer")
         print("")
         print("  Tip: `python naa.py start --visual` boots visual-only (auto-loads the image backend).")
+        print("       Add `--image-model flux` (or `--visual=flux`) to default to FLUX.1-dev-FP8.")
 
 
 COMMANDS = {

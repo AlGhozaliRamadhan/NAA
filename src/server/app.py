@@ -3,6 +3,7 @@ FastAPI Application Factory & Lifecycle for NAA (Notebooks AI API)
 """
 
 import logging
+import os
 import threading
 from pathlib import Path
 from datetime import datetime, timezone
@@ -28,6 +29,28 @@ from src.server.routes.images import router as images_router
 from src.server.routes.videos import router as videos_router
 
 logger = logging.getLogger("naa-app")
+
+
+def _cors_origins() -> list:
+    """
+    CORS allow-list from NAA_CORS_ORIGINS (comma-separated).
+
+    Defaults to same-origin only. NAA is normally reached through a public
+    tunnel by non-browser clients (SDKs, coding agents, curl), which never send
+    an Origin header and are unaffected by CORS at all. The previous wildcard
+    meant any page a browser visited could attach Authorization/x-api-key
+    cross-origin against a tunneled instance.
+    """
+    raw = os.environ.get("NAA_CORS_ORIGINS", "").strip()
+    if not raw or raw.lower() in ("none", "off", "false"):
+        return []
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+
+
+def _docs_enabled() -> bool:
+    """Interactive API docs are opt-in; they enumerate every route publicly."""
+    return os.environ.get("NAA_ENABLE_DOCS", "0").strip().lower() in ("1", "true", "yes")
+
 
 def create_app(
     engine: InferenceEngine = None,
@@ -92,12 +115,15 @@ def create_app(
             logger.warning(f"Model path {settings.model_path} does not exist. Awaiting download or configuration.")
         yield
 
+    docs_on = _docs_enabled()
     app = FastAPI(
         title="NAA (Notebooks AI API)",
         description="Production OpenAI/Anthropic-compatible Universal REST API for agentic local models",
         version="2.1.0",
-        docs_url="/docs",
-        redoc_url="/redoc",
+        # /docs and /redoc publicly enumerate every route including /v1/admin/*,
+        # so they are opt-in via NAA_ENABLE_DOCS rather than always on.
+        docs_url="/docs" if docs_on else None,
+        redoc_url="/redoc" if docs_on else None,
         lifespan=lifespan,
     )
 
@@ -115,13 +141,20 @@ def create_app(
     app.state.visual_only = visual_only
     app.state.start_time = datetime.now(timezone.utc)
 
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=False,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+    _cors = _cors_origins()
+    if _cors:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=_cors,
+            allow_credentials=False,
+            allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+            allow_headers=["Authorization", "x-api-key", "Content-Type", "anthropic-version"],
+        )
+    else:
+        logger.info(
+            "CORS disabled (same-origin only). Set NAA_CORS_ORIGINS to a "
+            "comma-separated allow-list to enable browser clients."
+        )
     app.add_middleware(GZipMiddleware, minimum_size=1000)
 
     @app.exception_handler(HTTPException)
@@ -164,7 +197,9 @@ def create_app(
             mode = "LLM-only (video routes disabled)"
         else:
             mode = "full (LLM + visual)"
-        available = ["GET /health", "GET /ping", "GET /docs"]
+        available = ["GET /health", "GET /ping"]
+        if docs_on:
+            available.append("GET /docs")
         if llm_enabled:
             available += [
                 "GET /v1/models",

@@ -28,7 +28,10 @@ def start_keepalive(port: int):
             try:
                 time.sleep(50)
                 _ = sum(i * i for i in range(300_000))
-                urllib.request.urlopen(f"http://localhost:{port}/ping", timeout=5)
+                # Close the response: this loop runs forever, and an unclosed
+                # urlopen leaked one socket + file descriptor every 50 seconds.
+                with urllib.request.urlopen(f"http://localhost:{port}/ping", timeout=5):
+                    pass
             except Exception:
                 pass
     t = threading.Thread(target=_loop, daemon=True)
@@ -40,12 +43,20 @@ def is_server_healthy(port: int) -> bool:
         return False
     if data.get("mode") == "visual":
         return bool(data.get("ok", True))
+    # Prefer the strict readiness flag; fall back to model_loaded only for older
+    # servers that do not report it yet.
+    if "model_ready" in data:
+        return bool(data.get("model_ready"))
     return bool(data.get("model_loaded"))
 
 
 def is_server_loading(port: int) -> bool:
     data = get_server_health(port)
-    if not data or data.get("load_error"):
+    if not data:
+        return False
+    # load_error no longer ships on the unauthenticated /health payload, so
+    # decide from the load stage alone: a terminal "error" stage is not loading.
+    if data.get("load_stage") == "error":
         return False
     return bool(
         data.get("model_loading")
@@ -61,7 +72,10 @@ def public_health_ok(url: str, timeout: float = 10.0) -> bool:
                     data = json.loads(r.read())
                     if data.get("mode") == "visual":
                         return bool(data.get("ok", True))
-                    if data.get("model_loaded"):
+                    if "model_ready" in data:
+                        if data.get("model_ready"):
+                            return True
+                    elif data.get("model_loaded"):
                         return True
         except Exception:
             pass

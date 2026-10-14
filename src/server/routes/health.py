@@ -65,7 +65,11 @@ async def health(request: Request):
         }
     active_model = getattr(engine, "model_name", settings.model_name)
     load_stage = getattr(engine, "load_stage", "ready" if getattr(engine, "model_loaded", False) else "loading")
-    load_error = getattr(engine, "load_error", None)
+    # Readiness is stricter than the model_loaded flag: is_ready() also requires a
+    # non-None model. A backend that "loaded" with model=None used to satisfy the
+    # supervisor's readiness probe, which opened the public tunnel onto a server
+    # that 503s on every request.
+    model_ready = bool(getattr(engine, "is_ready", lambda: False)())
 
     gpu_vram_used_mb = 0
     gpu_vram_total_mb = ENV.get("gpu_vram_mb", 0)
@@ -79,13 +83,20 @@ async def health(request: Request):
         pass
 
     return {
+        # `ok` stays liveness-only (the endpoint answered) for backwards
+        # compatibility with the supervisor and existing clients. Readiness is
+        # the separate, stricter `model_ready` flag, which also requires a
+        # non-None model.
         "ok": True,
         "status": "ok",
         "service": "NAA (Notebooks AI API)",
         "model_loaded": engine.model_loaded,
+        "model_ready": model_ready,
         "model_loading": engine.model_loading,
         "load_stage": load_stage,
-        "load_error": load_error,
+        # load_error is intentionally omitted: this endpoint is unauthenticated and
+        # reachable through the public tunnel, and loader exceptions routinely carry
+        # filesystem paths and repo ids. Operators read it from /v1/admin/stats.
         "model": active_model,
         "environment": ENV["name"],
         "gpu": ENV["gpu_name"] or "CPU",

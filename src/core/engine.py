@@ -20,7 +20,7 @@ except ImportError:
     LLAMA_CPP_AVAILABLE = False
     logger.warning("llama_cpp not available in environment.")
 
-from src.core.stop_criteria import get_combined_stop_tokens
+from src.core.stop_criteria import WindowedStringStopCriteria, get_combined_stop_tokens
 from src.core.prompt import DEFAULT_STOP_TOKENS, CANONICAL_SYSTEM_PROMPT, ChatMessage, prepare_chat_messages
 from src.core.llama_server import LlamaServerBackend
 from src.core.tool_calls import (
@@ -29,6 +29,47 @@ from src.core.tool_calls import (
     tokenizer_supports_tools,
     tools_for_transformers,
 )
+
+
+class _EventStoppingCriteria:
+    """
+    transformers StoppingCriteria backed by a threading.Event.
+
+    Lets a disconnected SSE client actually stop decoding instead of running to
+    max_new_tokens in a detached thread.
+    """
+
+    def __init__(self, cancel_event: threading.Event):
+        self._cancel_event = cancel_event
+
+    def __call__(self, input_ids: Any, scores: Any = None, **kwargs) -> bool:
+        return self._cancel_event.is_set()
+
+
+def _build_stopping_criteria(
+    tokenizer: Any,
+    stop_list: List[str],
+    input_length: int,
+    cancel_event: Optional[threading.Event] = None,
+) -> Any:
+    """
+    Assemble a transformers StoppingCriteriaList enforcing `stop_list` plus
+    optional cooperative cancellation. Returns None when transformers is absent
+    or the criteria cannot be built, so generation still works without them.
+    """
+    try:
+        from transformers import StoppingCriteriaList
+    except ImportError:
+        return None
+
+    criteria = [WindowedStringStopCriteria(tokenizer, stop_list, input_length)]
+    if cancel_event is not None:
+        criteria.append(_EventStoppingCriteria(cancel_event))
+    try:
+        return StoppingCriteriaList(criteria)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Could not build stopping criteria: %s", exc)
+        return None
 
 class InferenceEngine:
     """
@@ -72,7 +113,16 @@ class InferenceEngine:
         self.load_error: Optional[str] = None
         self.load_stage: str = "idle"
         self.lock = threading.Lock()
+        # llama.cpp's llama_context owns a single KV cache that is reset on every
+        # call, so concurrent inference on the same instance interleaves sequence
+        # state. Serialise it. The semaphore (not the lock) is what inference
+        # waits on, so saturation is observable via `is_inference_busy`.
+        self._inference_semaphore = threading.BoundedSemaphore(1)
         self.ready_event = threading.Event()
+
+    def is_inference_busy(self) -> bool:
+        """True when another request currently holds the inference slot."""
+        return self._inference_semaphore.locked()
 
     def _derive_model_name(self, path_or_repo: str) -> str:
         p = Path(path_or_repo)
@@ -161,10 +211,20 @@ class InferenceEngine:
                     self.model = llama_cpp.Llama(**llama_kwargs)
             else:
                 # Load Safetensors / Hugging Face model
+                # NOTE: the ImportError guard wraps ONLY the imports. Wrapping the
+                # whole block made an ImportError raised inside from_pretrained
+                # (bad trust_remote_code module, broken optional dep) look like
+                # "torch absent", leaving model_loaded=True with model=None --
+                # /health reported ready and the supervisor opened the tunnel on a
+                # server that 503s every request.
                 try:
                     import torch
                     from transformers import AutoModelForCausalLM, AutoTokenizer
-
+                except ImportError:
+                    logger.warning(
+                        "torch / transformers not available; operating in mock/compatibility mode."
+                    )
+                else:
                     logger.info(f"Initializing Transformers from: {model_path_str}")
                     self.tokenizer = AutoTokenizer.from_pretrained(
                         model_path_str,
@@ -201,9 +261,11 @@ class InferenceEngine:
                         model_path_str,
                         **load_kwargs,
                     )
-                except ImportError:
-                    logger.warning("torch / transformers not available; operating in mock/compatibility mode.")
 
+            # Mock/compatibility mode (no torch, no llama_cpp) still reports loaded so
+            # the fallback responses stay reachable, but a real backend that came up
+            # with model=None must NOT claim readiness -- that is what made the
+            # supervisor open a public tunnel onto a server that 503s.
             self.model_loaded = True
             self.load_stage = "ready"
             self.ready_event.set()
@@ -306,10 +368,12 @@ class InferenceEngine:
                     if tools:
                         kwargs["tools"] = tools
                         kwargs["tool_choice"] = tool_choice or "auto"
-                    for chunk in self.model.create_chat_completion(**kwargs):
-                        if stop_worker.is_set():
-                            break
-                        loop.call_soon_threadsafe(q.put_nowait, chunk)
+                    # One llama_context owns one KV cache, so only one call at a time.
+                    with self._inference_semaphore:
+                        for chunk in self.model.create_chat_completion(**kwargs):
+                            if stop_worker.is_set():
+                                break
+                            loop.call_soon_threadsafe(q.put_nowait, chunk)
                 elif self.tokenizer is not None and hasattr(self.model, "generate"):
                     import torch
                     from transformers import TextIteratorStreamer
@@ -342,26 +406,43 @@ class InferenceEngine:
                         "do_sample": temperature > 0,
                         "pad_token_id": getattr(self.tokenizer, "eos_token_id", None),
                     }
-
-                    gen_thread = threading.Thread(
-                        target=self.model.generate,
-                        kwargs=gen_kwargs,
-                        daemon=True,
+                    # Enforce stop tokens and the disconnect signal. Without these the
+                    # model ran to max_new_tokens and leaked a literal <|im_end|> into
+                    # content, and an abandoned stream kept decoding in a detached
+                    # thread that was never joined.
+                    stopping = _build_stopping_criteria(
+                        self.tokenizer,
+                        stop_list,
+                        int(inputs["input_ids"].shape[-1]),
+                        cancel_event=stop_worker,
                     )
-                    gen_thread.start()
+                    if stopping is not None:
+                        gen_kwargs["stopping_criteria"] = stopping
 
-                    first_chunk = True
-                    for new_text in streamer:
-                        if stop_worker.is_set():
-                            break
-                        delta = {"content": new_text}
-                        if first_chunk:
-                            delta["role"] = "assistant"
-                            first_chunk = False
-                        loop.call_soon_threadsafe(
-                            q.put_nowait,
-                            {"choices": [{"delta": delta, "finish_reason": None}]}
+                    with self._inference_semaphore:
+                        gen_thread = threading.Thread(
+                            target=self.model.generate,
+                            kwargs=gen_kwargs,
+                            daemon=True,
                         )
+                        gen_thread.start()
+
+                        try:
+                            first_chunk = True
+                            for new_text in streamer:
+                                if stop_worker.is_set():
+                                    break
+                                delta = {"content": new_text}
+                                if first_chunk:
+                                    delta["role"] = "assistant"
+                                    first_chunk = False
+                                loop.call_soon_threadsafe(
+                                    q.put_nowait,
+                                    {"choices": [{"delta": delta, "finish_reason": None}]}
+                                )
+                        finally:
+                            stop_worker.set()
+                            gen_thread.join(timeout=30)
 
                     loop.call_soon_threadsafe(
                         q.put_nowait,
@@ -380,7 +461,12 @@ class InferenceEngine:
             except Exception as e:
                 logger.error(f"Error in chat stream worker: {e}", exc_info=True)
             finally:
-                loop.call_soon_threadsafe(q.put_nowait, None)
+                # Raises "Event loop is closed" if the loop shut down first, which
+                # would escape the finally and kill the worker noisily.
+                try:
+                    loop.call_soon_threadsafe(q.put_nowait, None)
+                except RuntimeError:
+                    pass
 
         worker_thread = threading.Thread(target=_worker, daemon=True)
         worker_thread.start()
@@ -436,7 +522,8 @@ class InferenceEngine:
                 if tools:
                     kwargs["tools"] = tools
                     kwargs["tool_choice"] = tool_choice or "auto"
-                return self.model.create_chat_completion(**kwargs)
+                with self._inference_semaphore:
+                    return self.model.create_chat_completion(**kwargs)
             elif self.tokenizer is not None and hasattr(self.model, "generate"):
                 import torch
                 prompt_text = self._render_transformers_chat_prompt(
@@ -460,7 +547,15 @@ class InferenceEngine:
                     "do_sample": temperature > 0,
                     "pad_token_id": getattr(self.tokenizer, "eos_token_id", None),
                 }
-                outputs = self.model.generate(**gen_kwargs)
+                stopping = _build_stopping_criteria(
+                    self.tokenizer,
+                    stop_list,
+                    int(inputs["input_ids"].shape[-1]),
+                )
+                if stopping is not None:
+                    gen_kwargs["stopping_criteria"] = stopping
+                with self._inference_semaphore:
+                    outputs = self.model.generate(**gen_kwargs)
                 gen_tokens = outputs[0][inputs["input_ids"].shape[1]:]
                 response_text = self.tokenizer.decode(gen_tokens, skip_special_tokens=True)
                 return {
@@ -530,10 +625,11 @@ class InferenceEngine:
                         "stop": stop_list,
                         "stream": True,
                     }
-                    for chunk in self.model.create_completion(**kwargs):
-                        if stop_worker.is_set():
-                            break
-                        loop.call_soon_threadsafe(q.put_nowait, chunk)
+                    with self._inference_semaphore:
+                        for chunk in self.model.create_completion(**kwargs):
+                            if stop_worker.is_set():
+                                break
+                            loop.call_soon_threadsafe(q.put_nowait, chunk)
                 elif self.tokenizer is not None and hasattr(self.model, "generate"):
                     from transformers import TextIteratorStreamer
 
@@ -560,20 +656,33 @@ class InferenceEngine:
                         "pad_token_id": getattr(self.tokenizer, "eos_token_id", None),
                     }
 
-                    gen_thread = threading.Thread(
-                        target=self.model.generate,
-                        kwargs=gen_kwargs,
-                        daemon=True,
+                    stopping = _build_stopping_criteria(
+                        self.tokenizer,
+                        stop_list,
+                        int(inputs["input_ids"].shape[-1]),
+                        cancel_event=stop_worker,
                     )
-                    gen_thread.start()
+                    if stopping is not None:
+                        gen_kwargs["stopping_criteria"] = stopping
 
-                    for new_text in streamer:
-                        if stop_worker.is_set():
-                            break
-                        loop.call_soon_threadsafe(
-                            q.put_nowait,
-                            {"choices": [{"text": new_text, "index": 0, "finish_reason": None}]}
+                    with self._inference_semaphore:
+                        gen_thread = threading.Thread(
+                            target=self.model.generate,
+                            kwargs=gen_kwargs,
+                            daemon=True,
                         )
+                        gen_thread.start()
+                        try:
+                            for new_text in streamer:
+                                if stop_worker.is_set():
+                                    break
+                                loop.call_soon_threadsafe(
+                                    q.put_nowait,
+                                    {"choices": [{"text": new_text, "index": 0, "finish_reason": None}]}
+                                )
+                        finally:
+                            stop_worker.set()
+                            gen_thread.join(timeout=30)
 
                     loop.call_soon_threadsafe(
                         q.put_nowait,
@@ -591,7 +700,12 @@ class InferenceEngine:
             except Exception as e:
                 logger.error(f"Error in text stream worker: {e}", exc_info=True)
             finally:
-                loop.call_soon_threadsafe(q.put_nowait, None)
+                # Raises "Event loop is closed" if the loop shut down first, which
+                # would escape the finally and kill the worker noisily.
+                try:
+                    loop.call_soon_threadsafe(q.put_nowait, None)
+                except RuntimeError:
+                    pass
 
         worker_thread = threading.Thread(target=_worker, daemon=True)
         worker_thread.start()
@@ -626,17 +740,18 @@ class InferenceEngine:
 
         def _run():
             if hasattr(self.model, "create_completion"):
-                return self.model.create_completion(
-                    prompt=prompt,
-                    max_tokens=max_tokens,
-                    temperature=max(temperature, 1e-4) if temperature > 0 else 1e-4,
-                    top_p=top_p if (top_p is not None and temperature > 0) else 1.0,
-                    min_p=min_p,
-                    repeat_penalty=repeat_penalty,
-                    top_k=top_k,
-                    stop=stop_list,
-                    stream=False,
-                )
+                with self._inference_semaphore:
+                    return self.model.create_completion(
+                        prompt=prompt,
+                        max_tokens=max_tokens,
+                        temperature=max(temperature, 1e-4) if temperature > 0 else 1e-4,
+                        top_p=top_p if (top_p is not None and temperature > 0) else 1.0,
+                        min_p=min_p,
+                        repeat_penalty=repeat_penalty,
+                        top_k=top_k,
+                        stop=stop_list,
+                        stream=False,
+                    )
             elif self.tokenizer is not None and hasattr(self.model, "generate"):
                 inputs = self.tokenizer(prompt, return_tensors="pt")
                 if hasattr(self.model, "device"):
@@ -653,7 +768,15 @@ class InferenceEngine:
                     "do_sample": temperature > 0,
                     "pad_token_id": getattr(self.tokenizer, "eos_token_id", None),
                 }
-                outputs = self.model.generate(**gen_kwargs)
+                stopping = _build_stopping_criteria(
+                    self.tokenizer,
+                    stop_list,
+                    int(inputs["input_ids"].shape[-1]),
+                )
+                if stopping is not None:
+                    gen_kwargs["stopping_criteria"] = stopping
+                with self._inference_semaphore:
+                    outputs = self.model.generate(**gen_kwargs)
                 gen_tokens = outputs[0][inputs["input_ids"].shape[1]:]
                 response_text = self.tokenizer.decode(gen_tokens, skip_special_tokens=True)
                 return {

@@ -69,8 +69,13 @@ async def admin_stats(
         "uptime": uptime,
         "uptime_seconds": uptime,
         "model_loaded": engine.model_loaded,
+        "model_ready": bool(getattr(engine, "is_ready", lambda: False)()),
         "model": active_model,
         "model_path": str(engine.model_path),
+        # Load failures routinely contain filesystem paths and repo ids, so this
+        # lives behind the admin key rather than on the unauthenticated /health.
+        "load_error": getattr(engine, "load_error", None),
+        "load_stage": getattr(engine, "load_stage", None),
         "total_keys": len(keys),
         "active_keys": sum(1 for k in keys if k.get("active")),
         "total_requests": total_requests,

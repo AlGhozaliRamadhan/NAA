@@ -93,11 +93,19 @@ async def text_completions(
 
                 yield "data: [DONE]\n\n"
             except Exception as e:
-                logger.error(f"Stream text error: {e}")
+                logger.error(f"Stream text error: {e}", exc_info=True)
+                # Signal the failure before terminating. Swallowing it and
+                # closing with a clean [DONE] makes a truncated response
+                # indistinguishable from a complete one for the client.
                 try:
+                    yield "data: " + json.dumps(
+                        {"error": {"message": str(e), "type": "server_error"}}
+                    ) + "\n\n"
                     yield "data: [DONE]\n\n"
+                except (GeneratorExit, asyncio.CancelledError):
+                    raise
                 except Exception:
-                    pass
+                    logger.debug("Could not emit stream error frame", exc_info=True)
             finally:
                 km.record_usage(kd["key"], tok_count)
 

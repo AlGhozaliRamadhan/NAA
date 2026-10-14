@@ -21,6 +21,7 @@ import base64
 import io
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -75,19 +76,34 @@ def resolve_video_model_id(model: Optional[str]) -> str:
     return VIDEO_MODEL_ALIASES.get(key.lower(), key)
 
 
+_LORA_REPO_RE = re.compile(r"^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$")
+
+
 def parse_lora_repo(lora_url: Optional[str]) -> Optional[str]:
     """Extract ``owner/repo`` from a HuggingFace LoRA URL, if possible."""
     if not lora_url:
         return None
     url = lora_url.strip().rstrip("/")
     if "huggingface.co/" not in url:
-        # Already a repo id?
-        return url if "/" in url else None
+        # Already a repo id? Validate strictly. This used to return any string
+        # containing "/", so a caller-supplied "http://169.254.169.254/..." or
+        # "../../etc" became a repo id and reached the HF downloader.
+        return url if _LORA_REPO_RE.match(url) else None
     tail = url.split("huggingface.co/")[-1]
     parts = [p for p in tail.split("/") if p not in ("blob", "resolve", "raw", "tree", "main")]
     if len(parts) >= 2:
-        return f"{parts[0]}/{parts[1]}"
+        candidate = f"{parts[0]}/{parts[1]}"
+        return candidate if _LORA_REPO_RE.match(candidate) else None
     return None
+
+
+# Image inputs are decoded from base64/data-URIs, or read from a local path only
+# when it resolves inside this directory. Without the allow-list, any string that
+# failed base64 validation was treated as a filesystem path and read with
+# read_bytes() -- an arbitrary local file read and existence oracle reachable
+# through the public tunnel.
+_IMAGE_INPUT_DIR = Path(os.environ.get("NAA_IMAGE_INPUT_DIR", "uploads")).resolve()
+_ALLOWED_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif"}
 
 
 def decode_image_payload(image: Optional[str]) -> Optional[bytes]:
@@ -110,10 +126,19 @@ def decode_image_payload(image: Optional[str]) -> Optional[bytes]:
         # validate=True rejects non-base64 strings so plain paths fall through
         return base64.b64decode(text, validate=True)
     except Exception:
-        path = Path(image)
-        if path.is_file():
-            return path.read_bytes()
+        pass
+    # Fallback: a local path, but only inside the allow-listed input directory.
+    try:
+        candidate = Path(image).resolve()
+        if candidate.suffix.lower() not in _ALLOWED_IMAGE_SUFFIXES:
+            return None
+        if not candidate.is_relative_to(_IMAGE_INPUT_DIR):
+            return None
+        if candidate.is_file():
+            return candidate.read_bytes()
+    except (OSError, ValueError):
         return None
+    return None
 
 
 @dataclass
@@ -188,8 +213,12 @@ class VideoEngine:
 
         self._pipe: Optional[Any] = None
         self._pipe_model_id: Optional[str] = None
+        self._pipe_lora: Optional[tuple] = None
         self._mock_mode = False
         self._lock = threading.Lock()
+        # Serialises pipeline construction *and* rendering: one GPU, and two
+        # concurrent first-requests would each build a full Wan pipeline.
+        self._render_slots = threading.BoundedSemaphore(1)
         self._jobs: Dict[str, VideoJob] = {}
 
     # -- defaults snapshot (used by /v1/videos/config) ---------------------
@@ -216,6 +245,20 @@ class VideoEngine:
     def _set_job(self, job: VideoJob) -> None:
         with self._lock:
             self._jobs[job.id] = job
+            self._evict_finished_jobs()
+
+    def _evict_finished_jobs(self, keep: int = 50) -> None:
+        """
+        Bound the in-memory job store. Callers already hold self._lock.
+        Finished jobs age out oldest-first; running/queued jobs are never
+        dropped so a client can still poll them.
+        """
+        if len(self._jobs) <= keep:
+            return
+        finished = [j for j in self._jobs.values() if j.status in ("succeeded", "failed")]
+        finished.sort(key=lambda j: j.finished_at or 0.0)
+        for job in finished[: len(self._jobs) - keep]:
+            self._jobs.pop(job.id, None)
 
     # -- pipeline -----------------------------------------------------------
     def _apply_attention_backend(self, pipe: Any) -> None:
@@ -269,10 +312,24 @@ class VideoEngine:
         except Exception as exc:
             logger.warning("Could not apply video profile %s: %s", self.profile, exc)
 
-    def _ensure_pipeline(self, model_id: Optional[str] = None) -> Optional[Any]:
-        """Load (or reuse) the diffusers Wan pipeline. Returns None in mock mode."""
+    def _ensure_pipeline(
+        self, model_id: Optional[str] = None, lora: Optional[tuple] = None
+    ) -> Optional[Any]:
+        """
+        Load (or reuse) the diffusers Wan pipeline. Returns None in mock mode.
+
+        `lora` is (repo, strength) for this job. The pipeline cache is keyed on
+        the LoRA too, because fuse_lora mutates the pipeline in place: a cache
+        keyed only on model_id handed the second request a pipeline still fused
+        with the first request's LoRA and silently rendered the wrong output.
+        """
         target = resolve_video_model_id(model_id or self.model_id)
-        if self._pipe is not None and self._pipe_model_id == target:
+        lora_key = lora if lora is not None else (parse_lora_repo(self.lora_url) or None, float(self.lora_strength))
+        if (
+            self._pipe is not None
+            and self._pipe_model_id == target
+            and self._pipe_lora == lora_key
+        ):
             return self._pipe
         try:
             import torch
@@ -302,6 +359,7 @@ class VideoEngine:
             self._load_lora(pipe, self.lora_url, self.lora_strength)
             self._pipe = pipe
             self._pipe_model_id = target
+            self._pipe_lora = (parse_lora_repo(self.lora_url) or None, float(self.lora_strength))
             self._mock_mode = False
             return pipe
         except ImportError as exc:
@@ -378,6 +436,13 @@ class VideoEngine:
             },
         )
         self._set_job(job)
+        # Only one render may run at a time. Without this, a single valid 30-rpm
+        # key could spawn 30 concurrent Wan pipelines per minute against one
+        # GPU, which is an OOM/thread-exhaustion DoS rather than throttling.
+        if not self._render_slots.acquire(blocking=False):
+            job.status = "failed"
+            job.error = "A render is already in progress; retry shortly."
+            return job
         thread = threading.Thread(
             target=self._run_job, args=(job, image), daemon=True, name=f"video-{job.id}"
         )
@@ -386,26 +451,37 @@ class VideoEngine:
 
     # -- worker -------------------------------------------------------------
     def _run_job(self, job: VideoJob, image: Optional[str]) -> None:
-        job.status = "running"
-        job.progress = 0.05
-        self._set_job(job)
         try:
-            pipe = self._ensure_pipeline(job.params.get("model"))
-            out_path = self.output_dir / f"{job.id}.mp4"
-            if pipe is None:
-                self._render_mock(out_path, job)
-            else:
-                self._render_real(pipe, out_path, job, image)
-            job.status = "succeeded"
-            job.progress = 1.0
-            job.output_path = str(out_path)
-            job.finished_at = time.time()
-        except Exception as exc:
-            logger.error("Video job %s failed: %s", job.id, exc, exc_info=True)
-            job.status = "failed"
-            job.error = str(exc)
-            job.finished_at = time.time()
-        self._set_job(job)
+            job.status = "running"
+            job.progress = 0.05
+            self._set_job(job)
+            try:
+                # Honour this job's LoRA rather than always the engine default.
+                lora_url = job.params.get("lora_url")
+                lora_strength = float(job.params.get("lora_strength") or self.lora_strength)
+                pipe = self._ensure_pipeline(
+                    job.params.get("model"),
+                    lora=(parse_lora_repo(lora_url) or None, lora_strength),
+                )
+                out_path = self.output_dir / f"{job.id}.mp4"
+                if pipe is None:
+                    self._render_mock(out_path, job)
+                else:
+                    self._render_real(pipe, out_path, job, image)
+                job.status = "succeeded"
+                job.progress = 1.0
+                job.output_path = str(out_path)
+                job.finished_at = time.time()
+            except Exception as exc:
+                logger.error("Video job %s failed: %s", job.id, exc, exc_info=True)
+                job.status = "failed"
+                job.error = str(exc)
+                job.finished_at = time.time()
+            self._set_job(job)
+        finally:
+            # Always release the render slot, even on an unexpected failure,
+            # or the server would refuse every later job.
+            self._render_slots.release()
 
     def _render_real(self, pipe: Any, out_path: Path, job: VideoJob, image: Optional[str]) -> None:
         import torch

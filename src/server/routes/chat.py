@@ -39,6 +39,22 @@ def _engine_is_loading(engine: Any) -> bool:
     )
 
 
+def _estimate_tokens(payload: Any) -> int:
+    """
+    Rough ~4-chars-per-token prompt estimate.
+
+    `default=str` is required because request models can carry ChatMessage
+    objects, not just plain dicts.
+    """
+    if payload is None:
+        return 0
+    try:
+        serialized = json.dumps(payload, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        serialized = str(payload)
+    return max(1, len(serialized) // 4)
+
+
 def ensure_engine_ready(engine: Any) -> None:
     if not engine.is_ready():
         load_error = getattr(engine, "load_error", None)
@@ -388,10 +404,20 @@ async def chat_completions(
                 message, finish_reason = normalize_openai_message(
                     message, raw_finish, body.tools
                 )
+                estimated_prompt = max(
+                    1,
+                    _estimate_tokens(body.messages)
+                    + (_estimate_tokens(body.tools) if body.tools else 0),
+                )
+                estimated_completion = max(1, len(raw_content) // 4)
                 usage = {
-                    "prompt_tokens": 0,
-                    "completion_tokens": max(1, len(raw_content) // 4),
-                    "total_tokens": max(1, len(raw_content) // 4),
+                    # prompt_tokens was hardcoded to 0, which made
+                    # stream_options.include_usage useless for cost accounting
+                    # and left total_tokens != prompt + completion. Mirror the
+                    # Anthropic route's estimate so both agree.
+                    "prompt_tokens": estimated_prompt,
+                    "completion_tokens": estimated_completion,
+                    "total_tokens": estimated_prompt + estimated_completion,
                 }
 
                 recovery = asyncio.create_task(

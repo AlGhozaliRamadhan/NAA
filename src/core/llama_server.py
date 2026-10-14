@@ -229,6 +229,15 @@ class LlamaServerBackend:
             time.sleep(1.0)
 
         process.terminate()
+        # Reap the child so it does not linger as a zombie on POSIX.
+        try:
+            process.wait(timeout=10)
+        except Exception:
+            try:
+                process.kill()
+                process.wait(timeout=5)
+            except Exception:
+                pass
         raise RuntimeError(
             f"llama-server did not become ready within {timeout:g}s. "
             f"Last log output:\n{_log_tail(log_path)}"

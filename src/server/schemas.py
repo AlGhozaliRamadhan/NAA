@@ -60,12 +60,24 @@ class CompletionRequest(BaseModel):
     stream: Optional[bool] = False
     stop: Optional[Union[str, List[str]]] = None
 
-class ImageGenerationRequest(BaseModel):
-    """OpenAI-compatible image request.
+class ImageReference(BaseModel):
+    """One Cogito reference image for ``generation_mode="edit"``."""
 
-    Served by the Wan 2.2 visual backend as a single still frame — no separate
-    text-to-image checkpoint download needed. Extra keys (``response_format``,
-    ``style``, ...) are accepted and ignored.
+    model_config = ConfigDict(extra="allow")
+
+    mime_type: Optional[str] = None
+    b64_json: str = Field(min_length=1)
+    filename: Optional[str] = None
+
+
+class ImageGenerationRequest(BaseModel):
+    """OpenAI-compatible image request with Cogito edit support.
+
+    Text-to-image is the default (``prompt`` only). When the loaded backend
+    reports ``image_edit=true`` via ``GET /v1/models``, clients may send
+    ``generation_mode="edit"`` with ``reference_images``; the route maps them
+    to whichever image input the active runner exposes. Extra keys
+    (``response_format``, ``style``, ...) are accepted and ignored.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -79,6 +91,8 @@ class ImageGenerationRequest(BaseModel):
     guidance_scale: Optional[float] = Field(default=None, ge=0.0, le=20.0)
     num_inference_steps: Optional[int] = Field(default=None, ge=1, le=100)
     n: Optional[int] = Field(default=1, ge=1, le=4)
+    generation_mode: Optional[str] = Field(default=None)
+    reference_images: Optional[List[ImageReference]] = Field(default=None)
 
 
 class CreateKeyRequest(BaseModel):

@@ -4,6 +4,8 @@ import os
 import queue
 import re
 import time
+import hashlib
+import logging
 import platform
 import subprocess
 import threading
@@ -12,6 +14,8 @@ import urllib.request
 from collections import deque
 from pathlib import Path
 from typing import Deque, Optional, Tuple
+
+logger = logging.getLogger("naa-tunnel")
 
 CLOUDFLARED_URLS = {
     "linux_amd64":  "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64",
@@ -226,10 +230,51 @@ def cf_binary_path() -> Path:
     suffix = ".exe" if platform.system().lower() == "windows" else ""
     return Path("/tmp") / f"cloudflared{suffix}"
 
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _verify_cloudflared(path: Path) -> bool:
+    """
+    A sidecar .sha256 written next to the binary is the integrity anchor.
+
+    Cloudflare publishes per-release checksums, but pinning them here would rot
+    against ``releases/latest``. So: record the digest on first successful
+    download, and refuse to run the binary if it later changes. An operator who
+    wants a hard pin can set NAA_CLOUDFLARED_SHA256.
+    """
+    pinned = os.environ.get("NAA_CLOUDFLARED_SHA256", "").strip().lower()
+    if pinned:
+        return _sha256_file(path).lower() == pinned
+
+    sidecar = path.with_suffix(path.suffix + ".sha256")
+    try:
+        if not path.is_file() or path.stat().st_size < 1024 * 1024:
+            # A truncated/partial download never gets recorded, so it is retried.
+            return False
+        actual = _sha256_file(path).lower()
+        if sidecar.is_file():
+            return actual == sidecar.read_text().strip().lower()
+        sidecar.write_text(actual)
+        return True
+    except OSError:
+        return False
+
+
 def download_cloudflared() -> Path:
     dest = cf_binary_path()
-    if dest.exists():
+    if dest.exists() and _verify_cloudflared(dest):
         return dest
+    if dest.exists():
+        logger.warning("Discarding unverified cloudflared binary at %s", dest)
+        try:
+            dest.unlink()
+        except OSError:
+            pass
     system = platform.system().lower()
     arch = platform.machine().lower()
     if system == "windows":
@@ -242,7 +287,27 @@ def download_cloudflared() -> Path:
         key = "linux_amd64"
 
     url = CLOUDFLARED_URLS[key]
-    urllib.request.urlretrieve(url, str(dest))
+    # Download to a temp file and atomically move it into place. urlretrieve()
+    # used to write straight to dest, so an interrupted download left a
+    # truncated binary that the next run's exists() check happily executed.
+    tmp = dest.with_name(dest.name + ".part")
+    try:
+        urllib.request.urlretrieve(url, str(tmp))
+        os.replace(str(tmp), str(dest))
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+    if not _verify_cloudflared(dest):
+        raise RuntimeError(
+            "Downloaded cloudflared failed integrity verification. "
+            "Set NAA_CLOUDFLARED_SHA256 to the expected digest, or delete "
+            f"{dest} and retry."
+        )
+
     if system != "windows":
         os.chmod(str(dest), 0o755)
     return dest

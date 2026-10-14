@@ -67,9 +67,20 @@ class APIKeyManager:
             if self.keys_file.exists():
                 content = self.keys_file.read_text(encoding="utf-8").strip()
                 if content:
-                    self.keys = json.loads(content)
-                    logger.info(f"Loaded {len(self.keys)} API keys from {self.keys_file}")
-                    return
+                    loaded = json.loads(content)
+                    # Validate the shape. A non-dict value made validate_key
+                    # raise AttributeError on record.get(...) and 500 every
+                    # authenticated request.
+                    if isinstance(loaded, dict) and all(
+                        isinstance(v, dict) for v in loaded.values()
+                    ):
+                        self.keys = loaded
+                        logger.info(f"Loaded {len(self.keys)} API keys from {self.keys_file}")
+                        return
+                    logger.warning(
+                        f"{self.keys_file} has an unexpected structure; "
+                        "entries must map key -> object. Initializing empty store."
+                    )
         except Exception as e:
             logger.warning(f"Could not load API keys from {self.keys_file} ({e}), initializing empty store.")
         self.keys = {}
@@ -88,7 +99,10 @@ class APIKeyManager:
                     pass
 
             temp_file.replace(self.keys_file)
-            self._dirty = False
+            # NOTE: the dirty flag is cleared by the callers that own the lock
+            # (flush / _background_flusher), not here. _ensure_admin_key calls
+            # _save() without holding the lock, so clearing it in this method
+            # silently discarded pending usage counters.
         except Exception as e:
             logger.error(f"Failed to persist API keys to {self.keys_file}: {e}")
 
@@ -97,6 +111,7 @@ class APIKeyManager:
         with self.lock:
             if self._dirty:
                 self._save()
+                self._dirty = False
 
     def _background_flusher(self):
         """Periodically sync dirty state to disk in background."""
@@ -106,6 +121,7 @@ class APIKeyManager:
                 with self.lock:
                     if self._dirty:
                         self._save()
+                        self._dirty = False
             except Exception as e:
                 logger.error(f"Error in background key sync: {e}")
 

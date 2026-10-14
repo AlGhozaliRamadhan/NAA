@@ -158,6 +158,10 @@ class ToolTextStreamBuffer:
     def raw_text(self) -> str:
         return "".join(self.raw_parts)
 
+    def _contains_marker(self, text: str) -> bool:
+        lowered = text.lower()
+        return any(marker in lowered for marker in self._MARKERS)
+
     def feed(self, text: Any) -> str:
         if not isinstance(text, str) or not text:
             return ""
@@ -197,6 +201,15 @@ class ToolTextStreamBuffer:
             return ""
         safe = self.pending
         self.pending = ""
+        if self.hold_all and self._contains_marker(safe):
+            # With hold_all, feed() returns "" for every chunk and never sets
+            # tool_started, so finish() used to hand back the whole raw buffer --
+            # streaming literal <tool_call> markup to the client as content
+            # alongside the structured tool_calls block. This is exactly the
+            # path tool_choice="required" takes, i.e. every OpenCode/Claude Code
+            # turn. Drop it; normalize_openai_message still parses the full raw
+            # text separately.
+            return ""
         return safe
 
 

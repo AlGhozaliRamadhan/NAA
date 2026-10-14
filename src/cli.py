@@ -824,6 +824,10 @@ def start_server(
         stdout=log_handle,
         stderr=subprocess.STDOUT,
     )
+    # The child holds its own duplicate of the descriptor, so closing the
+    # parent's copy here is safe and stops a leak per restart -- cmd_start
+    # calls this up to three times per boot.
+    log_handle.close()
     _server_proc = proc
     if mod:
         setattr(mod, "_server_proc", proc)
@@ -842,8 +846,10 @@ def _server_log_tail(limit: int = 30) -> list[str]:
                 encoding="utf-8",
                 errors="replace",
             ).strip().splitlines()[-max(1, limit):]
-    except Exception:
-        pass
+    except Exception as exc:
+        # Swallowing this made the one diagnostic shown after a crash silently
+        # vanish, which is exactly when it is needed.
+        print(f"  (could not read {SERVER_LOG}: {exc})")
     return []
 
 
@@ -1407,7 +1413,13 @@ def cmd_start(args: list = None):
                     except Exception: pass
                 proc_restart_attempts += 1
                 if llm_enabled and return_code in (-4, -6, -11):
-                    _repair_gguf_cuda_backend()
+                    # The result used to be discarded, so "already attempted"
+                    # and "not a GPU host" were indistinguishable from
+                    # "rebuilt successfully" -- the operator had no signal that
+                    # the backend repair never ran.
+                    if not _repair_gguf_cuda_backend():
+                        warn("GGUF CUDA backend repair did not run or did not succeed; "
+                             "see the messages above for the reason.")
                 if llm_enabled:
                     _apply_gguf_memory_recovery(
                         model_path,

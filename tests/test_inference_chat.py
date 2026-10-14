@@ -39,7 +39,7 @@ def test_chat_completions_streaming(client: TestClient, user_headers, mock_engin
     response = client.post("/v1/chat/completions", headers=user_headers, json=payload)
     assert response.status_code == 200
     assert "text/event-stream" in response.headers["content-type"]
-    assert response.headers["connection"] == "close"
+    assert response.headers["connection"] == "keep-alive"
     assert response.headers["x-accel-buffering"] == "no"
 
     lines = [line for line in response.text.split("\n") if line.strip()]

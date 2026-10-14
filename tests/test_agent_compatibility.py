@@ -65,7 +65,12 @@ def _sse_data(response_text):
     ]
 
 
-def _finish_model_load(engine, delay=0.08):
+def _finish_model_load(engine, delay=0.3):
+    # _stream_engine_readiness clamps the heartbeat to a 0.05s floor and only
+    # emits a keepalive if the model is still loading after a sleep. A loader
+    # delay barely above that floor races the event loop and intermittently
+    # produces zero pings, so keep a wide margin over 0.05s while staying well
+    # under the tests' 1.0s model_wait_timeout.
     def finish():
         time.sleep(delay)
         engine.model_loaded = True

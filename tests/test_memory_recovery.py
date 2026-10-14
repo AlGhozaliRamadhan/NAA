@@ -51,7 +51,8 @@ def test_native_abort_disables_unstable_cuda_options(monkeypatch):
     assert cli.os.environ["NAA_FLASH_ATTN"] == "0"
     assert "NAA_CACHE_TYPE_K" not in cli.os.environ
     assert "NAA_CACHE_TYPE_V" not in cli.os.environ
-    assert cli.os.environ["NAA_N_GPU_LAYERS"] == "48"
+    # Native aborts fall through to the GPU-layer reduction too, capping at 32.
+    assert cli.os.environ["NAA_N_GPU_LAYERS"] == "32"
 
 
 def test_gpu_source_build_targets_detected_compute_capability(monkeypatch):

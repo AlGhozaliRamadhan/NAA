@@ -455,7 +455,15 @@ curl "https://YOUR-URL.trycloudflare.com/v1/admin/stats" \
 | `POST` | `/v1/admin/keys/revoke` | Admin Key | Deactivate an API key |
 | `DELETE` | `/v1/admin/keys/{key}` | Admin Key | Permanently remove an API key |
 | `GET` | `/v1/admin/stats` | Admin Key | Retrieve server uptime, total requests, and token counts |
-| `GET` | `/docs` | None | Interactive Swagger UI API documentation |
+| `GET` | `/docs` | None | Interactive Swagger UI API documentation (requires `NAA_ENABLE_DOCS=1`) |
+
+> **`/health` is unauthenticated and public through the tunnel**, so it reports
+> only non-sensitive state. `ok` means the endpoint answered; `model_ready` is the
+> strict readiness signal (it also requires a loaded model, not just the
+> `model_loaded` flag) and is what the supervisor uses before opening the tunnel.
+> Load errors are not exposed here because loader exceptions routinely contain
+> filesystem paths and repo ids — read them from `GET /v1/admin/stats` with the
+> admin key instead.
 
 ---
 
@@ -496,6 +504,10 @@ curl "https://YOUR-URL.trycloudflare.com/v1/admin/stats" \
 | `NAA_SSE_HEARTBEAT` | `5.0` | Interval in seconds for SSE streaming keepalive comments |
 | `NAA_MODEL_WAIT_TIMEOUT` | `600.0` | Maximum seconds an agent SSE request waits for a reloading model while receiving keepalives |
 | `NAA_TUNNEL_PROVIDER` | `cloudflare` | Tunnel transport: `cloudflare`, `ngrok` (supports agent SSE stream), `localhost-run` (free/no signup), or `none` |
+| `NAA_CORS_ORIGINS` | `None` (same-origin only) | Comma-separated CORS allow-list. Left unset, browser cross-origin requests are refused. Needed only for browser clients such as OpenWebUI |
+| `NAA_ENABLE_DOCS` | `0` | Set to `1` to expose `/docs` and `/redoc`. Off by default because they publicly enumerate every route, including `/v1/admin/*` |
+| `NAA_CLOUDFLARED_SHA256` | Auto (sidecar) | Pin the expected SHA-256 of the downloaded `cloudflared` binary. Without a pin, NAA records the digest beside the binary and refuses to run it if it later changes |
+| `NAA_IMAGE_INPUT_DIR` | `uploads` | Directory that local-path image inputs for image-to-video are resolved against. Paths outside it are rejected |
 | `NAA_NGROK_AUTHTOKEN` | None | Authtoken for ngrok tunnel (`NAA_TUNNEL_PROVIDER="ngrok"`) |
 | `NAA_SSH_IDENTITY_FILE` | Runtime temporary file | Dedicated SSH key used to retain a localhost.run hostname across reconnects |
 | `NAA_CF_TUNNEL_TOKEN` | None | Token for a remotely-managed Cloudflare Tunnel; required for reliable SSE agent traffic |

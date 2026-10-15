@@ -70,58 +70,51 @@ For GGUF models on Kaggle GPU, install `llama-cpp-python` with prebuilt CUDA whe
 One cell. Paste it, run it, and leave it running.
 
 ```python
-# NAA on Google Colab — single cell. Paste, run, and leave it running.
-import os, subprocess, sys
+import os, glob, site
 
-REPO_URL = "https://github.com/AlGhozaliRamadhan/NAA.git"
-REPO = "/content/NAA"
+%cd /content
 
-# --- config ---------------------------------------------------------------
-# Leave MODEL empty for the default model. For something else, paste its
-# Hugging Face URL (a .gguf link pulls the CUDA wheel automatically).
-MODEL = ""
-# --------------------------------------------------------------------------
-
-def sh(*cmd):
-    print("$", " ".join(cmd), flush=True)
-    subprocess.run(cmd, check=True)
-
-# Fresh clone, or hard-reset onto main. The reset is deliberate: a stale
-# checkout hides the GGUF loader diagnostics, and a failed load then looks like
-# a slow one for the full 600s timeout.
-if os.path.isdir(os.path.join(REPO, ".git")):
-    sh("git", "-C", REPO, "fetch", "--quiet", "origin")
-    sh("git", "-C", REPO, "reset", "--hard", "origin/main")
+# Track main. A stale checkout hides the loader diagnostics, and a failed load
+# then looks like a slow one for the full 600s timeout.
+if not os.path.exists("/content/NAA/.git"):
+    !git clone -b main https://github.com/AlGhozaliRamadhan/NAA.git /content/NAA
 else:
-    sh("git", "clone", "--depth", "1", REPO_URL, REPO)
+    !git -C /content/NAA fetch origin
+    !git -C /content/NAA checkout main
+    !git -C /content/NAA pull --ff-only origin main
 
-os.chdir(REPO)
+%cd /content/NAA
 
-# localhost.run supports SSE. Cloudflare Quick Tunnels do not, and both
-# OpenCode and Claude Code need SSE to stream.
 os.environ["NAA_TUNNEL_PROVIDER"] = "localhost-run"
-
-# T4 (sm_75) starting profile. NAA shrinks these itself on a real OOM.
-os.environ["NAA_CTX"] = "8192"
-os.environ["NAA_MAX_TOKENS"] = "4096"
+os.environ["NAA_MODEL_NAME"] = "gemma4-12b-uncensored"
+os.environ["NAA_CTX"] = "16384"
+os.environ["NAA_MAX_TOKENS"] = "1024"
+os.environ["NAA_N_GPU_LAYERS"] = "-1"
+os.environ["NAA_CACHE_TYPE_K"] = "q8_0"
+os.environ["NAA_CACHE_TYPE_V"] = "q8_0"
 os.environ["NAA_FLASH_ATTN"] = "0"
+os.environ["NAA_MODEL_WAIT_TIMEOUT"] = "600"
+os.environ.pop("NAA_FORCE_LLAMA_CPP_REBUILD", None)
 
-sh(sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt")
+!pip install -q -r requirements.txt
 
-# --llm skips the Wan video backend and its multi-GB checkpoint download.
-# Drop the flag if you also want image/video generation.
-cmd = [sys.executable, "naa.py", "start", "--llm"]
+# The CUDA wheel alone is not enough on Colab. libggml-cuda.so links against
+# libcublas / libcudart / libcudnn, which ship as pip packages and are not on
+# the default loader path. Without this step the library fails to load and
+# llama.cpp silently falls back to CPU: the model loads fine, VRAM never
+# rises, and inference runs at RAM speed.
+!pip install -q nvidia-cuda-runtime-cu12 nvidia-cublas-cu12 nvidia-cudnn-cu12
+!pip install -q llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
 
-if MODEL.strip():
-    # This must be the CUDA wheel. With a CPU-only build llama.cpp loads the
-    # model into RAM without complaining, then runs at CPU speed.
-    sh(sys.executable, "-m", "pip", "install", "-q",
-       "llama-cpp-python>=0.3.25", "--upgrade",
-       "--extra-index-url",
-       "https://abetlen.github.io/llama-cpp-python/whl/cu121")
-    cmd += ["--model", MODEL]
+_libs = []
+for _p in site.getsitepackages():
+    _libs += glob.glob(os.path.join(_p, "nvidia", "*", "lib"))
+os.environ["LD_LIBRARY_PATH"] = ":".join([*_libs, os.environ.get("LD_LIBRARY_PATH", "")]).strip(":")
 
-sh(*cmd)
+subprocess = __import__("subprocess")
+subprocess.run(["python", "-c", "import llama_cpp; print('llama_cpp OK', llama_cpp.__version__)"])
+
+!python naa.py start --llm --model "HauhauCS/Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced:Gemma4-12B-QAT-Uncensored-HauhauCS-Balanced-Q4_K_M.gguf"
 ```
 
 If the loading bar rises and then falls back to 0.7%, that is not a slow load — the loader allocated the model, then unwound and freed it. Paste this into a **second cell while the first is still spinning**:
@@ -141,15 +134,17 @@ Read `load_error` and match it to a fix:
 
 | `load_error` contains | Meaning | Fix |
 | --- | --- | --- |
-| `unknown model architecture` | The `llama-cpp-python` wheel predates this model's ggml arch. | Set `MODEL = ""`, set `os.environ["NAA_GGUF_BACKEND"] = "llama-server"` above `sh(*cmd)`, and re-run so NAA builds current llama.cpp. |
-| `Failed to load libggml-cuda` / `undefined symbol` | CUDA backend would not load; llama.cpp fell back to CPU. | Re-run the cell with `NAA_FORCE_LLAMA_CPP_REBUILD=1` set to rebuild against the T4. |
-| `out of memory` / `failed to allocate` | Genuine VRAM pressure. | Set `NAA_CTX` to `4096` and `NAA_N_GPU_LAYERS` to `32`. |
+| `Failed to load libggml-cuda` / `undefined symbol` | CUDA libraries were not on the loader path; llama.cpp fell back to CPU. | Confirm the `nvidia-*-cu12` install and the `LD_LIBRARY_PATH` step ran **in the same cell**, before the server starts. |
+| `unknown model architecture` | The `llama-cpp-python` wheel predates this model's ggml arch. | Add `os.environ["NAA_GGUF_BACKEND"] = "llama-server"` above the start line, so NAA builds current llama.cpp. |
+| `out of memory` / `failed to allocate` | Genuine VRAM pressure. | Lower `NAA_CTX` and `NAA_N_GPU_LAYERS`. |
 
 If `load_error` is null, read the raw log instead:
 
 ```python
 print(pathlib.Path("/content/naa_server.log").read_text(errors="replace")[-4000:])
 ```
+
+**Is the GPU actually being used?** The VRAM bar is the ground truth, not a library probe. If it climbs into the tens of percent while the model loads, layers are on the GPU. If it sits at ~0.1 GB, the model is in system RAM and inference is on the CPU. (`llama_cpp.llama_supports_gpu_offload()` is *not* a reliable test — it is known to report `False` while GPU inference is working.)
 
 When the server initializes, the terminal displays:
 

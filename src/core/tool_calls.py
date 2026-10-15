@@ -588,6 +588,14 @@ def normalize_openai_message(
         if parsed_calls:
             normalized["tool_calls"] = parsed_calls
             return normalized, "tool_calls"
+    # Thinking backends (llama-server) put short replies entirely in
+    # `reasoning_content` when max_tokens is tiny (Janitor's Test uses 10).
+    # OpenAI clients read only `content`, so an empty content looks like a
+    # failed fetch. Promote reasoning to content when content is empty.
+    if not normalized.get("content"):
+        reasoning = normalized.get("reasoning_content")
+        if isinstance(reasoning, str) and reasoning.strip():
+            normalized["content"] = reasoning
     return normalized, finish_reason or "stop"
 
 

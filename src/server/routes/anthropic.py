@@ -339,12 +339,13 @@ async def create_anthropic_message(
                         continue
                     choice = choices[0]
                     delta = choice.get("delta") or {}
-                    if delta.get("content"):
-                        content_parts.append(delta["content"])
+                    _delta_text = delta.get("content") or delta.get("reasoning_content")
+                    if _delta_text:
+                        content_parts.append(_delta_text)
                         safe_text = (
-                            text_buffer.feed(delta["content"])
+                            text_buffer.feed(_delta_text)
                             if text_buffer
-                            else delta["content"]
+                            else _delta_text
                         )
                         if safe_text:
                             if not text_block_started:

@@ -332,7 +332,7 @@ async def chat_completions(
                         continue
                     choice = choices[0]
                     delta = choice.get("delta") or {}
-                    content = delta.get("content")
+                    content = delta.get("content") or delta.get("reasoning_content")
                     if content:
                         content_parts.append(content)
                         safe_text = text_buffer.feed(content) if text_buffer else content

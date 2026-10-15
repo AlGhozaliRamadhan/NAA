@@ -25,7 +25,7 @@ from src.server.auth import get_api_key
 from src.server.schemas import ChatCompletionRequest
 
 logger = logging.getLogger("naa-chat")
-router = APIRouter(prefix="/v1", tags=["Chat"])
+router = APIRouter(tags=["Chat"])
 
 
 class EngineUnavailableError(RuntimeError):
@@ -248,7 +248,8 @@ async def _collect_stream(
         await queue.put(("done", None))
 
 
-@router.post("/chat/completions")
+@router.post("/v1/chat/completions")
+@router.post("/chat/completions", include_in_schema=False)
 async def chat_completions(
     body: ChatCompletionRequest,
     request: Request,

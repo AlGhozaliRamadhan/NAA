@@ -16,7 +16,7 @@ from src.server.schemas import CompletionRequest
 from src.server.auth import get_api_key
 
 logger = logging.getLogger("naa-completions")
-router = APIRouter(prefix="/v1", tags=["Completions"])
+router = APIRouter(tags=["Completions"])
 
 def ensure_engine_ready(engine):
     if not engine.is_ready():
@@ -25,7 +25,8 @@ def ensure_engine_ready(engine):
             detail="Model is loading. Please retry in a few moments." if engine.model_loading else "Model is not loaded."
         )
 
-@router.post("/completions")
+@router.post("/v1/completions")
+@router.post("/completions", include_in_schema=False)
 async def text_completions(
     body: CompletionRequest,
     request: Request,

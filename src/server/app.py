@@ -206,6 +206,9 @@ def create_app(
                 "POST /v1/chat/completions",
                 "POST /v1/completions",
                 "POST /v1/messages",
+                "POST /chat/completions",
+                "POST /completions",
+                "POST /messages",
             ]
         if visual_enabled:
             available += [

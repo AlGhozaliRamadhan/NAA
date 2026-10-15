@@ -247,6 +247,7 @@ async def anthropic_connection_probe() -> Response:
 
 
 @router.post("/v1/messages/count_tokens")
+@router.post("/messages/count_tokens", include_in_schema=False)
 async def count_anthropic_tokens(
     request: Request,
     body: Dict[str, Any] = Body(...),
@@ -259,6 +260,7 @@ async def count_anthropic_tokens(
 
 
 @router.post("/v1/messages")
+@router.post("/messages", include_in_schema=False)
 async def create_anthropic_message(
     body: AnthropicMessageRequest,
     request: Request,

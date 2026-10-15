@@ -8,7 +8,7 @@ from src.config import settings
 from src.server.schemas import EmbeddingRequest
 from src.server.auth import get_api_key
 
-router = APIRouter(prefix="/v1", tags=["Models"])
+router = APIRouter(tags=["Models"])
 
 # ---------------------------------------------------------------------------
 # Universal model aliases
@@ -56,7 +56,8 @@ def _make_alias(alias_id: str, root: str, display: str) -> Dict[str, Any]:
     }
 
 
-@router.get("/models")
+@router.get("/v1/models")
+@router.get("/models", include_in_schema=False)
 async def list_models(request: Request, kd: Dict[str, Any] = Depends(get_api_key)):
     if not getattr(request.app.state, "llm_enabled", True):
         # Visual-only: Cogito media discovery. Capabilities come from the
@@ -120,7 +121,8 @@ async def list_models(request: Request, kd: Dict[str, Any] = Depends(get_api_key
     return {"object": "list", "data": models}
 
 
-@router.post("/embeddings")
+@router.post("/v1/embeddings")
+@router.post("/embeddings", include_in_schema=False)
 async def create_embeddings(body: EmbeddingRequest, kd: Dict[str, Any] = Depends(get_api_key)):
     raise HTTPException(
         status_code=status.HTTP_501_NOT_IMPLEMENTED,

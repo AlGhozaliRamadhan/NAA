@@ -38,6 +38,10 @@ from src.supervisor.watchdog import (
 _server_proc: Optional[subprocess.Popen] = None
 _tunnel_proc: Optional[subprocess.Popen] = None
 _gguf_backend_repair_attempted = False
+# Loader message from the most recent load attempt, filled in by the step-2
+# loading loop (which already polls /health) and read back by the supervisor's
+# memory-recovery heuristics.  None means "nothing observed".
+_last_seen_load_error: Optional[str] = None
 
 RESET = "\033[0m"
 GREEN = "\033[32m"
@@ -863,10 +867,41 @@ def _print_server_log_tail(limit: int = 30) -> None:
     print("------------------------------\n")
 
 
+def _last_load_error() -> Optional[str]:
+    """Return the loader message from the most recent load attempt.
+
+    Sourced from the cache the loading loop already fills in, never from a new
+    request.  Re-querying /health here looked cheaper than threading state
+    through, but a refused localhost connect blocks for seconds on Windows --
+    which sat directly in the supervisor's crash-recovery path and delayed
+    every restart.  None means "no load error observed", which leaves the
+    recovery heuristics exactly as they were.
+    """
+    return _last_seen_load_error or None
+
+
+# Loader failures that moving layers onto system RAM cannot fix.  NAA used to
+# answer every restart by cutting NAA_N_GPU_LAYERS, so one unfixable error
+# turned into a ratchet: each cycle pushed the model further off the GPU until
+# inference ran on CPU and looked like "the GPU stopped being used".  A missing
+# ggml architecture or an unloadable libggml-cuda is unaffected by layer count.
+_UNFIXABLE_BY_OFFLOAD = (
+    "unknown model architecture",
+    "unsupported model architecture",
+    "is not installed",
+    "undefined symbol",
+    "cannot open shared object file",
+    "no such file or directory",
+    "not a gguf file",
+    "invalid magic",
+)
+
+
 def _apply_gguf_memory_recovery(
     model_path: Path,
     attempt: int,
     return_code: Optional[int] = None,
+    load_error: Optional[str] = None,
 ) -> bool:
     """Stage a safer llama.cpp profile after a hard GGUF server crash."""
 
@@ -875,6 +910,15 @@ def _apply_gguf_memory_recovery(
     )
     if not enabled or Path(model_path).suffix.lower() != ".gguf":
         return False
+
+    if load_error:
+        probe = load_error.lower()
+        if any(marker in probe for marker in _UNFIXABLE_BY_OFFLOAD):
+            warn(
+                "Load failure is not a VRAM problem, so GPU layers are left "
+                "untouched: " + load_error.strip().splitlines()[0][:200]
+            )
+            return False
 
     changes = []
     native_abort = return_code in (-4, -6, -11)
@@ -1072,7 +1116,7 @@ def cmd_setup(args: list = None):
     ok("Setup complete! Run: python naa.py start")
 
 def cmd_start(args: list = None):
-    global _tunnel_proc, _server_proc
+    global _tunnel_proc, _server_proc, _last_seen_load_error
 
     load_state_fn = _get_attr("load_state", load_state)
     save_state_fn = _get_attr("save_state", save_state)
@@ -1293,10 +1337,24 @@ def cmd_start(args: list = None):
             pass
 
         if health_data:
-            if health_data.get("load_error"):
+            # A terminal load_stage means the loader gave up.  Without this the
+            # loop kept spinning for the full 600s and then reported a bare
+            # "timed out", which hides the one message that explains the load
+            # (a CUDA OOM, an unknown ggml arch, a missing backend).
+            load_error = health_data.get("load_error")
+            if load_error or health_data.get("load_stage") == "error":
                 sys.stdout.write("\033[0m\n")
                 sys.stdout.flush()
-                err(f"Model load failed: {health_data['load_error']}")
+                # Keep the message so the supervisor can tell an unfixable
+                # loader fault from VRAM exhaustion before it strips layers.
+                if load_error:
+                    _last_seen_load_error = str(load_error)
+                err(
+                    f"Model load failed: {load_error}"
+                    if load_error
+                    else "Model load failed (no error detail reported)."
+                )
+                _print_server_log_tail(40)
                 return
 
             gpu_name = health_data.get("gpu", "CPU")
@@ -1330,6 +1388,9 @@ def cmd_start(args: list = None):
         sys.stdout.write("\033[0m\n")
         sys.stdout.flush()
         err("Model loading timed out after 600s.")
+        # The timeout path is reached when the loader hung rather than failed,
+        # so the child log is the only remaining evidence of where it stalled.
+        _print_server_log_tail(40)
         return
 
     step(3, "Starting public HTTPS tunnel...")
@@ -1425,6 +1486,7 @@ def cmd_start(args: list = None):
                         model_path,
                         proc_restart_attempts,
                         return_code=return_code,
+                        load_error=_last_load_error(),
                     )
                 if proc_restart_attempts > 5:
                     err("Server crashed repeatedly; stopping instead of hiding an endless restart loop.")
@@ -1462,7 +1524,11 @@ def cmd_start(args: list = None):
                     proc_restart_attempts += 1
                     _print_server_log_tail(40)
                     if llm_enabled:
-                        _apply_gguf_memory_recovery(model_path, proc_restart_attempts)
+                        _apply_gguf_memory_recovery(
+                            model_path,
+                            proc_restart_attempts,
+                            load_error=_last_load_error(),
+                        )
                     # Re-fetch the proc reference; it may have changed if the
                     # server was already restarted in this loop iteration.
                     stale_proc = _get_attr("_server_proc", _server_proc)

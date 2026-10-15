@@ -65,6 +65,16 @@ async def health(request: Request):
         }
     active_model = getattr(engine, "model_name", settings.model_name)
     load_stage = getattr(engine, "load_stage", "ready" if getattr(engine, "model_loaded", False) else "loading")
+
+    # Loader exceptions routinely carry filesystem paths and repo ids, so they
+    # must not reach the public tunnel.  The local supervisor still needs them,
+    # though: without them a failed load looks identical to a slow one and the
+    # operator only ever sees "timed out after 600s" while the VRAM bar silently
+    # falls back to the CUDA context baseline.  So the detail is returned to
+    # loopback callers only.  Anything arriving through a tunnel or a reverse
+    # proxy has a non-loopback peer and still gets no error text.
+    client_host = request.client.host if request.client else ""
+    local_call = client_host in ("127.0.0.1", "::1", "localhost")
     # Readiness is stricter than the model_loaded flag: is_ready() also requires a
     # non-None model. A backend that "loaded" with model=None used to satisfy the
     # supervisor's readiness probe, which opened the public tunnel onto a server
@@ -94,9 +104,9 @@ async def health(request: Request):
         "model_ready": model_ready,
         "model_loading": engine.model_loading,
         "load_stage": load_stage,
-        # load_error is intentionally omitted: this endpoint is unauthenticated and
-        # reachable through the public tunnel, and loader exceptions routinely carry
-        # filesystem paths and repo ids. Operators read it from /v1/admin/stats.
+        # None for every non-loopback caller; see the note above. Operators who
+        # reach a remote instance read the same value from /v1/admin/stats.
+        "load_error": getattr(engine, "load_error", None) if local_call else None,
         "model": active_model,
         "environment": ENV["name"],
         "gpu": ENV["gpu_name"] or "CPU",

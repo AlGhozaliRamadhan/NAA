@@ -539,16 +539,19 @@ def ensure_gguf_deps() -> bool:
 
 
 def _select_gguf_backend(model_cfg: Dict[str, Any]) -> None:
-    """Prefer a current standalone engine for Qwen3.8's new CUDA path."""
+    """Prefer a current standalone engine for new GGUF architectures."""
 
     if os.environ.get("NAA_GGUF_BACKEND"):
         return
     filename = str(model_cfg.get("file", ""))
     name = str(model_cfg.get("name", ""))
-    if filename.lower().endswith(".gguf") and "qwen3.8" in f"{name} {filename}".lower():
+    haystack = f"{name} {filename}".lower()
+    if filename.lower().endswith(".gguf") and any(
+        marker in haystack for marker in ("qwen3.8", "qwen3.5", "gemma4", "gemma3")
+    ):
         os.environ["NAA_GGUF_BACKEND"] = "llama-server"
         info(
-            "Qwen3.8 GGUF detected; selecting the current standalone "
+            "New-architecture GGUF detected; selecting the current standalone "
             "llama-server CUDA backend."
         )
 

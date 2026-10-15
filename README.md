@@ -322,6 +322,20 @@ Then start NAA normally. The API summary will print the generated URL and the `n
 
 For a 15 GB Colab T4, do not fully offload a 13.5 GB GGUF with a 16K context: model weights are not the only VRAM allocation. Start with `NAA_CTX=8192`, `NAA_N_GPU_LAYERS=48`, and Flash Attention disabled for the Qwen3.5/Qwen3.8 hybrid CUDA path, as shown in the Colab GGUF example. If a GGUF process is killed under memory pressure, NAA prints the child log and automatically retries with progressively safer memory settings. If the native CUDA library aborts, NAA performs one GPU-specific source rebuild instead of misdiagnosing it as OOM forever.
 
+### When the VRAM bar rises and then falls back
+
+A loading bar that climbs and then drops back to the bare CUDA-context baseline (~0.1 GB) means the loader allocated the model and then unwound: `engine.load()` caught an exception, `load_stage` went to `error`, and the partial allocation was freed. It is not a slow load.
+
+NAA prints the loader's own message and the tail of `naa_server.log` the moment `load_stage` reports `error`, so the real cause is on screen instead of a bare "timed out after 600s". Read that message first — it decides the fix:
+
+- `unknown model architecture` — the pinned `llama-cpp-python` wheel predates this model's ggml architecture. Set `NAA_GGUF_BACKEND=llama-server` so NAA builds current llama.cpp instead (`_ensure_standalone_llama_server`).
+- `Failed to load libggml-cuda.so` / `undefined symbol` — the CUDA backend would not load, so llama.cpp ran on CPU. Set `NAA_FORCE_LLAMA_CPP_REBUILD=1` and re-run `setup` to rebuild against the detected compute capability.
+- `out of memory` / `failed to allocate` — genuine VRAM pressure. Lower `NAA_CTX` and `NAA_N_GPU_LAYERS`; NAA's auto-recovery already does this.
+
+NAA only strips GPU layers for failures that offloading can actually fix. An architecture or library fault leaves `NAA_N_GPU_LAYERS` alone, because ratcheting layers onto system RAM cannot repair it and makes the model appear to run on CPU for no reason.
+
+`/health` returns the loader message to loopback callers only; tunnel and proxy callers still get no error detail, and `/v1/admin/stats` carries it for remote operators.
+
 ### Stable Cloudflare hostname
 
 Create a remotely-managed tunnel in Cloudflare, publish a hostname whose service URL is `http://localhost:8000`, and set these variables before starting NAA:

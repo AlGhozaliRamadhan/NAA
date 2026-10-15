@@ -25,35 +25,35 @@ Paste the corresponding cell into your Kaggle or Colab notebook and run it.
 
 ### For Kaggle
 
+Plain Python, no IPython magic — magics cannot be indented, so `%cd` inside an `if` block is a syntax error.
+
 ```python
-import os
+import os, subprocess, sys
 
-# 1. Start from base Kaggle working directory
-%cd /kaggle/working
+REPO_URL = "https://github.com/AlGhozaliRamadhan/NAA.git"
+REPO = "/kaggle/working/NAA"
 
-# 2. Clone or pull latest NAA repository
-if not os.path.exists("NAA"):
-    print("Repository not found. Cloning...")
-    !git clone https://github.com/AlGhozaliRamadhan/NAA.git NAA
-    %cd /kaggle/working/NAA
+def sh(*cmd):
+    print("$", " ".join(cmd), flush=True)
+    subprocess.run(cmd, check=True)
+
+os.makedirs("/kaggle/working", exist_ok=True)
+
+if os.path.isdir(os.path.join(REPO, ".git")):
+    sh("git", "-C", REPO, "fetch", "--quiet", "origin")
+    sh("git", "-C", REPO, "reset", "--hard", "origin/main")
 else:
-    print("Repository found at NAA. Checking for updates...")
-    %cd /kaggle/working/NAA
-    !git stash
-    !git pull origin main
-    !git stash drop
+    sh("git", "clone", "--depth", "1", REPO_URL, REPO)
 
-print("\033[0m", end="")
+os.chdir(REPO)
 
-# 3. Install dependencies and launch NAA server
-!pip install -q -r requirements.txt
-!python naa.py start
+sh(sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt")
+sh(sys.executable, "naa.py", "start", "--llm")
 ```
 
 Visual-only on Kaggle (Wan 2.2 video, skips the LLM entirely):
 
 ```python
-!pip install -q -r requirements.txt
 !python naa.py video setup
 !python naa.py start --visual
 ```
@@ -61,52 +61,94 @@ Visual-only on Kaggle (Wan 2.2 video, skips the LLM entirely):
 For GGUF models on Kaggle GPU, install `llama-cpp-python` with prebuilt CUDA wheels:
 
 ```python
-!pip install -q -r requirements.txt
 !pip install -q llama-cpp-python --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu121
-!python naa.py start --model "https://huggingface.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED/blob/main/Qwen3.8-27B-OBLITERATED-Q4_K_M.gguf"
+!python naa.py start --llm --model "https://huggingface.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED/blob/main/Qwen3.8-27B-OBLITERATED-Q4_K_M.gguf"
 ```
 
 ### For Google Colab
 
+One cell. Paste it, run it, and leave it running.
+
 ```python
-import os
+# NAA on Google Colab — single cell. Paste, run, and leave it running.
+import os, subprocess, sys
 
-%cd /content
+REPO_URL = "https://github.com/AlGhozaliRamadhan/NAA.git"
+REPO = "/content/NAA"
 
-if not os.path.exists("/content/NAA/.git"):
-    print("Repository not found. Cloning...")
-    !git clone https://github.com/AlGhozaliRamadhan/NAA.git /content/NAA
+# --- config ---------------------------------------------------------------
+# Leave MODEL empty for the default model. For something else, paste its
+# Hugging Face URL (a .gguf link pulls the CUDA wheel automatically).
+MODEL = ""
+# --------------------------------------------------------------------------
+
+def sh(*cmd):
+    print("$", " ".join(cmd), flush=True)
+    subprocess.run(cmd, check=True)
+
+# Fresh clone, or hard-reset onto main. The reset is deliberate: a stale
+# checkout hides the GGUF loader diagnostics, and a failed load then looks like
+# a slow one for the full 600s timeout.
+if os.path.isdir(os.path.join(REPO, ".git")):
+    sh("git", "-C", REPO, "fetch", "--quiet", "origin")
+    sh("git", "-C", REPO, "reset", "--hard", "origin/main")
 else:
-    print("Repository found. Checking for updates...")
-    !git -C /content/NAA pull --ff-only origin main
+    sh("git", "clone", "--depth", "1", REPO_URL, REPO)
 
-%cd /content/NAA
+os.chdir(REPO)
 
-# Free HTTPS tunnel with no signup, token, or domain.
+# localhost.run supports SSE. Cloudflare Quick Tunnels do not, and both
+# OpenCode and Claude Code need SSE to stream.
 os.environ["NAA_TUNNEL_PROVIDER"] = "localhost-run"
 
-!pip install -q -r requirements.txt
-!python naa.py start
-```
-
-For GGUF models on Google Colab GPU:
-
-```python
-import os
-
-# Stable starting profile for a free 15 GB T4 and this 13.5 GB GGUF.
+# T4 (sm_75) starting profile. NAA shrinks these itself on a real OOM.
 os.environ["NAA_CTX"] = "8192"
 os.environ["NAA_MAX_TOKENS"] = "4096"
 os.environ["NAA_FLASH_ATTN"] = "0"
-os.environ["NAA_N_GPU_LAYERS"] = "40"
-os.environ["NAA_MODEL_WAIT_TIMEOUT"] = "600"
-os.environ["NAA_TUNNEL_PROVIDER"] = "localhost-run"
-# Use NAA's prebuilt CUDA wheel first.  Do not force a source build unless a
-# diagnosed native CUDA error specifically requires it.
-os.environ.pop("NAA_FORCE_LLAMA_CPP_REBUILD", None)
 
-!pip install -q -r requirements.txt
-!python naa.py start --model "https://huggingface.co/OBLITERATUS/Qwen3.8-27B-OBLITERATED/blob/main/Qwen3.8-27B-OBLITERATED-Q3_K_M.gguf"
+sh(sys.executable, "-m", "pip", "install", "-q", "-r", "requirements.txt")
+
+# --llm skips the Wan video backend and its multi-GB checkpoint download.
+# Drop the flag if you also want image/video generation.
+cmd = [sys.executable, "naa.py", "start", "--llm"]
+
+if MODEL.strip():
+    # This must be the CUDA wheel. With a CPU-only build llama.cpp loads the
+    # model into RAM without complaining, then runs at CPU speed.
+    sh(sys.executable, "-m", "pip", "install", "-q",
+       "llama-cpp-python>=0.3.25", "--upgrade",
+       "--extra-index-url",
+       "https://abetlen.github.io/llama-cpp-python/whl/cu121")
+    cmd += ["--model", MODEL]
+
+sh(*cmd)
+```
+
+If the loading bar rises and then falls back to 0.7%, that is not a slow load — the loader allocated the model, then unwound and freed it. Paste this into a **second cell while the first is still spinning**:
+
+```python
+import json, pathlib, urllib.request
+
+state = json.loads(pathlib.Path("/content/NAA/.naa_state.json").read_text())
+req = urllib.request.Request(
+    "http://localhost:8000/v1/admin/stats",
+    headers={"Authorization": f"Bearer {state['admin_key']}"},
+)
+print(json.dumps(json.loads(urllib.request.urlopen(req, timeout=5).read()), indent=2))
+```
+
+Read `load_error` and match it to a fix:
+
+| `load_error` contains | Meaning | Fix |
+| --- | --- | --- |
+| `unknown model architecture` | The `llama-cpp-python` wheel predates this model's ggml arch. | Set `MODEL = ""`, set `os.environ["NAA_GGUF_BACKEND"] = "llama-server"` above `sh(*cmd)`, and re-run so NAA builds current llama.cpp. |
+| `Failed to load libggml-cuda` / `undefined symbol` | CUDA backend would not load; llama.cpp fell back to CPU. | Re-run the cell with `NAA_FORCE_LLAMA_CPP_REBUILD=1` set to rebuild against the T4. |
+| `out of memory` / `failed to allocate` | Genuine VRAM pressure. | Set `NAA_CTX` to `4096` and `NAA_N_GPU_LAYERS` to `32`. |
+
+If `load_error` is null, read the raw log instead:
+
+```python
+print(pathlib.Path("/content/naa_server.log").read_text(errors="replace")[-4000:])
 ```
 
 When the server initializes, the terminal displays:

@@ -12,7 +12,12 @@ class ChatCompletionRequest(BaseModel):
 
     model: str = Field(default="NAA-AI-Model")
     messages: List[ChatMessage]
-    max_tokens: Optional[int] = Field(default=2048, ge=1, le=65536)
+    # `ge=0` accepts 0 as "no explicit cap, use the server default", which is
+    # what the `body.max_tokens or settings.default_tokens` fallback in the
+    # routes already does.  Browser clients (Janitor's Max Tokens slider, for
+    # one) send 0 to mean unlimited, and a `ge=1` bound rejected those with a
+    # 422 before the route logic ever ran.  Negative values stay invalid.
+    max_tokens: Optional[int] = Field(default=2048, ge=0, le=65536)
     temperature: Optional[float] = Field(default=0.70, ge=0.0, le=2.0)
     top_p: Optional[float] = Field(default=0.90, ge=0.0, le=1.0)
     min_p: Optional[float] = Field(default=0.05, ge=0.0, le=1.0)
@@ -51,7 +56,8 @@ class AnthropicMessageRequest(BaseModel):
 class CompletionRequest(BaseModel):
     model: str = Field(default="NAA-AI-Model")
     prompt: str
-    max_tokens: Optional[int] = Field(default=2048, ge=1, le=65536)
+    # See ChatCompletionRequest.max_tokens: 0 means "use the server default".
+    max_tokens: Optional[int] = Field(default=2048, ge=0, le=65536)
     temperature: Optional[float] = Field(default=0.70, ge=0.0, le=2.0)
     top_p: Optional[float] = Field(default=0.90, ge=0.0, le=1.0)
     min_p: Optional[float] = Field(default=0.05, ge=0.0, le=1.0)

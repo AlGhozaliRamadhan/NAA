@@ -4,10 +4,23 @@ Tests for Pydantic input validation, bounds checks, and OpenAI error format conf
 
 from fastapi.testclient import TestClient
 
-def test_chat_invalid_max_tokens_bounds(client: TestClient, user_headers):
+def test_chat_max_tokens_zero_means_unlimited(client: TestClient, user_headers):
+    """0 is a legitimate "no explicit cap" value, not a bounds violation.
+
+    Browser clients send it to mean unlimited, and the routes already resolve
+    it via `body.max_tokens or settings.default_tokens`.
+    """
     res = client.post("/v1/chat/completions", headers=user_headers, json={
         "messages": [{"role": "user", "content": "hello"}],
         "max_tokens": 0
+    })
+    assert res.status_code == 200
+
+
+def test_chat_invalid_max_tokens_bounds(client: TestClient, user_headers):
+    res = client.post("/v1/chat/completions", headers=user_headers, json={
+        "messages": [{"role": "user", "content": "hello"}],
+        "max_tokens": -1
     })
     assert res.status_code == 422
     data = res.json()

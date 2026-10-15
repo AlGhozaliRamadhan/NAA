@@ -97,7 +97,9 @@ os.environ["NAA_MAX_TOKENS"] = "1024"
 os.environ["NAA_N_GPU_LAYERS"] = "48"
 os.environ["NAA_CACHE_TYPE_K"] = "q8_0"
 os.environ["NAA_CACHE_TYPE_V"] = "q8_0"
-os.environ["NAA_FLASH_ATTN"] = "0"
+# Quantized KV (q8_0) REQUIRES flash-attn on: llama.cpp aborts with
+# `quantized V cache requires flash_attn to be enabled` if it is off.
+os.environ["NAA_FLASH_ATTN"] = "1"
 os.environ["NAA_MODEL_WAIT_TIMEOUT"] = "600"
 os.environ.pop("NAA_FORCE_LLAMA_CPP_REBUILD", None)
 
